@@ -64,7 +64,18 @@ fn run_update_from_unwritable_dir() -> (ReadOnlyInstall, i32, String) {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("chmod dir");
 
     let guard = ReadOnlyInstall { dir };
-    let out = Command::new(&exe).arg("update").output().expect("run update");
+    // Hermetic: `tina4 update` first sweeps PATH for old CLIs to delete and then
+    // refreshes skills under HOME, so neither may be the developer's own.
+    let home = std::env::temp_dir().join(format!("tina4-update-ro-home-{}", unique));
+    std::fs::create_dir_all(&home).expect("create home");
+    let out = Command::new(&exe)
+        .arg("update")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .output()
+        .expect("run update");
+    std::fs::remove_dir_all(&home).ok();
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (guard, out.status.code().unwrap_or(-1), text)
