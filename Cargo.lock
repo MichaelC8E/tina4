@@ -1480,6 +1480,7 @@ dependencies = [
  "libc",
  "notify",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tokio",

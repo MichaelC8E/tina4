@@ -63,6 +63,12 @@ ctrlc = { version = "3", features = ["termination"] }
 # openssl-sys which can't find /usr/include/openssl on cross-compile
 # (see v3.8.27 release CI). Pure-Rust TLS works on every target we ship.
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+# SHA-256 for the native AI-skills installer's checksum gate. ring is ALREADY in
+# the locked graph (rustls pulls it in for TLS), so this direct dependency adds
+# no new crate — it just names what src/skills.rs uses. Deliberately NOT the
+# CLI's own sha256_of_file: that shells out to `Get-FileHash` through PowerShell
+# on Windows, the exact spawn the native installer exists to remove.
+ring = "0.17"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -77,6 +83,11 @@ tree-sitter-rust = "0.24"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# For the native skills-installer integration test to build a valid skills.sha256
+# fixture. Already a normal dependency (see above), so this adds no new crate.
+ring = "0.17"
 
 [profile.release]
 opt-level = "z"

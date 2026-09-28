@@ -18,6 +18,7 @@ mod rag;
 mod scss;
 mod session;
 mod setup;
+mod skills;
 mod upgrade;
 mod watcher;
 

@@ -4,32 +4,17 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The skills refresh has to say why it failed.
+//! The skills refresh has to say why it failed — now for the NATIVE installer.
 //!
-//! A report arrived showing `Installing tina4 AI skills for all...`, then the
-//! skip line, and nothing in between -- no cause, on the one platform nobody
-//! here can run. The cause had been in hand and thrown away:
-//! `.map(|s| s.success()).unwrap_or(false)` mapped a failed spawn and a
-//! non-zero exit onto the same bare `false`, so the caller had nothing to print.
+//! A report once arrived showing `Installing tina4 AI skills for all...`, then
+//! the skip line, and nothing in between — no cause. The native installer keeps
+//! that contract: when it cannot fetch the skill files, it prints the reason and
+//! the "run later" hint, and returns rather than hanging or clobbering anything.
 //!
-//! These drive the real binary through `install_skills_target`'s failure paths
-//! and assert the reason reaches stdout. They gate the CALL SITE: every unit
-//! test in `setup.rs` stays green if the `println!` is deleted.
-//!
-//! ## Why the assertions are shaped the way they are
-//!
-//! An earlier version asserted on `"could not be started"` and `"sh"`. Both are
-//! produced by the PRE-EXISTING download branch as well -- `main.rs` prints
-//! "the downloader could not be started", and the source URLs end
-//! `install-skills.sh`. On a box where the download branch was reached instead,
-//! the test passed against completely unfixed source. Every assertion here is
-//! now a string only the repaired path can emit, and each test also asserts the
-//! download branch was NOT the one taken.
-//!
-//! Hermetic by construction: `PATH` is a directory holding a `curl` that is a
-//! copy of `true`, so the download "succeeds" without a network and without
-//! writing a file. What the tests vary is whether the interpreter that would
-//! run the installer can be spawned.
+//! This drives the REAL binary at roots that resolve to nothing (a `file://`
+//! path that does not exist), so every download fails locally with no network.
+//! It also runs with a PATH that has `curl` and NO shell, proving the failure
+//! path — like the success path — spawns no `sh` / `powershell` of its own.
 
 #![cfg(unix)]
 
@@ -38,99 +23,79 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A private directory, 0700, that cannot collide with another user's.
-/// `create_dir` fails rather than adopting a path someone else planted --
-/// the same shape `skills_stage_dir` uses in production, and for the same
-/// reason: a shell is about to be pointed at the contents.
 fn private_dir(label: &str) -> PathBuf {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tina4-spawn-gate-{}-{label}-{stamp}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("tina4-skills-why-{}-{label}-{stamp}", std::process::id()));
     fs::create_dir(&dir).expect("could not create a private temp directory");
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("could not narrow it");
     dir
 }
 
-/// A PATH directory holding exactly the programs named, plus a `curl` that
-/// exits 0 without writing anything so no test here touches a network.
-///
-/// `curl` is COPIED, not symlinked: a symlink to a missing target is created
-/// happily and then fails to spawn, which silently moved the run into the
-/// download branch and made these tests pass against unfixed source.
-fn farm(label: &str, programs: &[&str]) -> PathBuf {
-    let dir = private_dir(label);
-    let truth = which::which("true").expect("no `true` on this box, so `curl` cannot be stubbed");
-    fs::copy(&truth, dir.join("curl")).expect("could not stub curl");
-    assert!(dir.join("curl").exists(), "the curl stub did not land");
-    for program in programs {
-        let real = which::which(program).unwrap_or_else(|_| panic!("no {program} on this box"));
-        std::os::unix::fs::symlink(real, dir.join(program)).expect("could not plant a program");
+fn which_curl() -> PathBuf {
+    for dir in std::env::var("PATH").unwrap_or_default().split(':') {
+        let candidate = Path::new(dir).join("curl");
+        if candidate.is_file() {
+            return candidate;
+        }
     }
-    dir
+    panic!("no curl on PATH; the CLI's download primitive needs it");
 }
 
-fn refresh_skills_with(path: &Path, label: &str) -> String {
-    let home = private_dir(&format!("home-{label}"));
+/// A PATH holding a real `curl` and nothing else — no `sh`, no `powershell`.
+fn curl_only_path() -> PathBuf {
+    let bin = private_dir("curl-only");
+    fs::copy(which_curl(), bin.join("curl")).expect("could not stage curl");
+    fs::set_permissions(bin.join("curl"), fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+#[test]
+fn a_refresh_that_cannot_download_says_why_and_spawns_no_shell() {
+    let home = private_dir("home");
+    let bin = curl_only_path();
+    // A root that resolves to nothing, so every source fails fast and locally.
+    let dead_root = format!("file://{}", private_dir("empty").join("does-not-exist").display());
+
     let out = Command::new(env!("CARGO_BIN_EXE_tina4"))
         .args(["skills", "all"])
-        .env("PATH", path)
+        .env("PATH", &bin)
         .env("HOME", &home)
+        .env("TINA4_SKILLS_HOME", &home)
+        .env("TINA4_SKILLS_REF", "0.0.0-test")
+        .env("TINA4_SKILLS_TINA4_ROOT", &dead_root)
+        .env("TINA4_SKILLS_JSDELIVR_ROOT", &dead_root)
+        .env("TINA4_SKILLS_RAW_ROOT", &dead_root)
+        .env("TINA4_SKILLS_RETRY_DELAY", "0")
+        .env("TINA4_SKILLS_RETRY_COUNT", "1")
         .output()
         .expect("could not run the tina4 binary");
-    let _ = fs::remove_dir_all(&home);
-    let _ = fs::remove_dir_all(path);
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
-    // Both tests are about the SPAWN. If the run died in the download branch
-    // instead, nothing below tests what it claims to.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    // It named a cause — not a bare skip with nothing above it.
     assert!(
-        !stdout.contains("Could not download the skills installer"),
-        "the run never reached the spawn -- it failed while downloading:\n{stdout}"
+        combined.contains("every download source failed"),
+        "the refresh failed without naming the cause:\n{combined}"
     );
+    // It printed the skip hint.
     assert!(
         stdout.contains("Skills install skipped"),
-        "the refresh did not fail at all, so this test proves nothing:\n{stdout}"
+        "the refresh did not report the skip:\n{stdout}"
     );
-    stdout
-}
+    // Running with no shell on PATH proves the native path did not reach for one:
+    // a spawn of an absent `sh`/`powershell` would surface as a different error.
+    assert!(
+        !combined.contains("could not be started") && !combined.contains("No such file"),
+        "the installer tried to spawn a program that was not on PATH:\n{combined}"
+    );
+    // Nothing was published.
+    assert!(!home.join(".claude").join("skills").join("tina4-maintainer").exists());
 
-/// The reported failure: the interpreter cannot be spawned at all.
-#[test]
-fn a_spawn_that_never_starts_says_so() {
-    let out = refresh_skills_with(&farm("nostart", &[]), "nostart");
-    // Program-qualified on purpose. A bare "could not be started" is also what
-    // the download branch prints, as "the downloader could not be started".
-    assert!(
-        out.contains("sh could not be started"),
-        "a refresh that died at the spawn still printed no cause:\n{out}"
-    );
-    assert!(
-        !out.contains("ran and exited"),
-        "a spawn that never started was reported as having run:\n{out}"
-    );
-}
-
-/// The other half of the collapse: it started, ran, and came back non-zero.
-/// This must NOT read like the case above -- telling them apart is the point.
-///
-/// Note what actually fails here: `sh` starts and cannot open the installer
-/// path, because the stubbed `curl` wrote no file. That is a weaker scenario
-/// than "the installer ran and failed", but it is the same `Exited` variant
-/// through the same call site, which is what is being gated.
-#[test]
-fn a_child_that_runs_and_fails_says_that_instead() {
-    let out = refresh_skills_with(&farm("exited", &["sh"]), "exited");
-    assert!(
-        out.contains("sh ran and exited"),
-        "a child that ran and failed was not reported as having run:\n{out}"
-    );
-    assert!(
-        !out.contains("could not be started"),
-        "a child that ran was reported as never having started:\n{out}"
-    );
+    let _ = fs::remove_dir_all(&home);
+    let _ = fs::remove_dir_all(&bin);
 }
