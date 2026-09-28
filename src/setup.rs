@@ -744,6 +744,13 @@ fn ensure_claude_code() {
     println!("  {} Installing Claude Code (no Node required)...", icon_play().green());
     // Native installer — does NOT depend on Node.js. (npm install -g is only
     // for users who already have Node and prefer it.)
+    //
+    // tina4: this is a THIRD-PARTY `irm | iex` installer, so it carries the same
+    // latent Windows Defender / ASR risk the native skills installer was built to
+    // avoid — a freshly-updated `tina4.exe` spawning PowerShell to `iex` a
+    // downloaded script can be blocked with os error 225. It is left as-is on
+    // purpose (we do not own claude.ai/install.ps1 or astral.sh/uv/install.ps1);
+    // follow-up: offer a download-then-verify-then-run path for these too.
     if console::is_windows() {
         let _ = Command::new(windows_powershell())
             .args(["-NoProfile", "-Command", "irm https://claude.ai/install.ps1 | iex"])
@@ -831,131 +838,6 @@ fn skills_target_from_choice(choice: &str) -> &'static str {
         "3" | "cursor" => "cursor",
         _ => "all",
     }
-}
-
-/// Where the AI-skills installer comes from: tina4.com FIRST, then two
-/// independent GitHub-backed CDNs, all serving the same bytes for the path.
-///
-/// One host is not enough, and the FIRST host must not be GitHub. On 2026-09-08
-/// a developer's `tina4 update` died on "Error 503 Backend.max_conn reached"
-/// from the Varnish tier in front of raw.githubusercontent.com; a later raw
-/// incident 503'd every skill file because the jsDelivr `@main` fallback was
-/// serving a STALE raw-first installer from cache. The installer these URLs
-/// point at is itself tina4.com-first for the skill files, so leading here with
-/// the tina4.com bootstrap keeps the whole `tina4 update` walk -- installer AND
-/// files -- off GitHub on the common path. jsDelivr and raw stay as fallbacks
-/// (retried three times each) for the rare case tina4.com is down.
-const SKILLS_INSTALLER_SOURCES_SH: [&str; 3] = [
-    "https://tina4.com/install-skills.sh",
-    "https://cdn.jsdelivr.net/gh/tina4stack/tina4@main/install-skills.sh",
-    "https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh",
-];
-const SKILLS_INSTALLER_SOURCES_PS1: [&str; 3] = [
-    "https://tina4.com/install-skills.ps1",
-    "https://cdn.jsdelivr.net/gh/tina4stack/tina4@main/install-skills.ps1",
-    "https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.ps1",
-];
-
-/// Attempts per source, and the pause between them. The same numbers the
-/// installer scripts use for their own downloads.
-const SKILLS_FETCH_ATTEMPTS: u32 = 3;
-const SKILLS_FETCH_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// A ceiling on the whole walk.
-///
-/// `curl` is invoked here without a timeout, the same as everywhere else in
-/// this client, so a host that accepts a connection and then says nothing can
-/// hang for as long as the OS allows. Six attempts where the shipped code made
-/// one would multiply that wait by six. Once this much time has gone, no
-/// further attempt is started -- a slow update is a bug report of its own, and
-/// the point of the retries is a CDN that answers quickly and badly, which is
-/// what the reporter hit.
-const SKILLS_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Fetch the installer into `dest`, trying every source in turn.
-///
-/// A *local* failure does not end this walk, and that is deliberate -- it is
-/// the opposite of `download_file`'s rule for release assets. That walk tries
-/// different asset names on one host, so a full disk or a dead route dooms
-/// every remaining name equally and continuing only buries the real error.
-/// These are two different hosts. "Could not reach raw.githubusercontent.com"
-/// says nothing at all about jsDelivr, so every source gets its turn and the
-/// last failure is what gets reported.
-fn fetch_skills_installer(sources: &[&str], dest: &Path) -> Result<(), String> {
-    let started = std::time::Instant::now();
-    let mut last = "no source was tried".to_string();
-    let mut first = true;
-    for url in sources {
-        for attempt in 1..=SKILLS_FETCH_ATTEMPTS {
-            // The first attempt always runs, however long getting here took.
-            if !first && started.elapsed() >= SKILLS_FETCH_BUDGET {
-                return Err(format!("{last} (gave up after {}s)", started.elapsed().as_secs()));
-            }
-            first = false;
-            match crate::download_file_classified(url, dest) {
-                crate::DownloadOutcome::Ok => return Ok(()),
-                crate::DownloadOutcome::Http => {
-                    last = format!("{url} answered with an HTTP error")
-                }
-                crate::DownloadOutcome::Local(cause) => {
-                    last = format!("{url}: {}", cause.why())
-                }
-            }
-            // A refused download can still have left a partial or empty file.
-            let _ = fs::remove_file(dest);
-            if attempt < SKILLS_FETCH_ATTEMPTS {
-                std::thread::sleep(SKILLS_FETCH_DELAY);
-            }
-        }
-    }
-    Err(last)
-}
-
-/// A private directory to stage the installer in.
-///
-/// `create_dir` fails if the path already exists, so this can never be aimed at
-/// something another user planted in a world-writable temp directory -- and the
-/// name carries a timestamp as well as the pid so a recycled pid cannot make a
-/// stale directory block every future run. On Unix it is then narrowed to 0700,
-/// because the next thing that happens to its contents is that a shell runs
-/// them.
-fn skills_stage_dir() -> io::Result<PathBuf> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("tina4-skills-{}-{}", std::process::id(), stamp));
-    fs::create_dir(&dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(dir)
-}
-
-/// Escape a path for embedding in a single-quoted PowerShell string.
-fn ps_single_quote(path: &Path) -> String {
-    path.display().to_string().replace('\'', "''")
-}
-
-/// The PowerShell one-liner that runs the downloaded skills installer.
-///
-/// It reads the installer's TEXT and hands it to `iex`, rather than running the
-/// file with `-File`. `-File` on a downloaded .ps1 has to clear the execution
-/// policy and the mark-of-the-web; a string handed to `iex` clears neither
-/// because neither applies to it.
-///
-/// The text is read with `[System.IO.File]::ReadAllText`, NOT `Get-Content -Raw`.
-/// On a real Windows box `Get-Content -Raw` handed `iex` a `[byte[]]` and it
-/// refused with "Cannot convert 'System.Byte[]' to the type 'System.String'
-/// required by parameter 'Command'". `ReadAllText` always returns a String and
-/// auto-detects the BOM, so the (EV-signed) installer runs whatever its encoding.
-fn windows_skills_command(target: &str, script: &Path) -> String {
-    format!(
-        "$ErrorActionPreference='Stop'; $env:TINA4_SKILLS_TARGET='{target}'; iex ([System.IO.File]::ReadAllText('{}'))",
-        ps_single_quote(script)
-    )
 }
 
 /// Which PowerShell to spawn on Windows, as an absolute path.
@@ -1052,99 +934,14 @@ fn choose_powershell(
     "powershell".to_string()
 }
 
+/// Install the AI skills for `target` natively — see [`crate::skills`].
+///
+/// This used to download `install-skills.sh` / `install-skills.ps1` and run
+/// it (on Windows via `powershell -Command "iex(<downloaded script>)"`), which
+/// Windows Defender / ASR blocked on a freshly-updated binary (os error 225).
+/// The installer now runs in-process and spawns no shell.
 fn install_skills_target(target: &str) -> bool {
-    println!("  {} Installing tina4 AI skills for {}...", icon_play().green(), target);
-
-    let windows = console::is_windows();
-    let sources: &[&str] = if windows {
-        &SKILLS_INSTALLER_SOURCES_PS1
-    } else {
-        &SKILLS_INSTALLER_SOURCES_SH
-    };
-
-    let stage = match skills_stage_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            println!(
-                "  {} Could not create a temporary directory for the skills installer — {}",
-                icon_warn().yellow(),
-                e
-            );
-            println!(
-                "  {} Skills install skipped — run later: {}",
-                icon_warn().yellow(),
-                "tina4 ai".cyan()
-            );
-            return false;
-        }
-    };
-    let script = stage.join(if windows {
-        "install-skills.ps1"
-    } else {
-        "install-skills.sh"
-    });
-
-    // Download first, run second.
-    //
-    // The old shape was `curl -fsSL <url> | sh`, and it could not see a failed
-    // download at all: a pipeline exits with the status of its LAST command,
-    // and `sh` reading the empty stdin that `curl -f` leaves behind exits 0.
-    // So on macOS and Linux a 503 was reported as a successful refresh, with
-    // nothing installed and nothing said. Windows was luckier only because
-    // PowerShell exits non-zero when `irm` throws -- it printed a raw .NET
-    // exception, but it did at least say the refresh had failed.
-    if let Err(why) = fetch_skills_installer(sources, &script) {
-        let _ = fs::remove_dir_all(&stage);
-        println!(
-            "  {} Could not download the skills installer — {}",
-            icon_warn().yellow(),
-            why
-        );
-        println!(
-            "  {} Skills install skipped — run later: {}",
-            icon_warn().yellow(),
-            "tina4 ai".cyan()
-        );
-        return false;
-    }
-
-    let outcome = if windows {
-        // Still `iex` over the installer's text, not `-File` (see
-        // windows_skills_command for why). The text is read with
-        // [System.IO.File]::ReadAllText, not `Get-Content -Raw`, which handed
-        // `iex` a [byte[]] on a real Windows box and was refused.
-        //
-        // The program is resolved rather than named: see windows_powershell.
-        run_status_reason(
-            &windows_powershell(),
-            &[
-                "-NoProfile",
-                "-Command",
-                &windows_skills_command(target, &script),
-            ],
-        )
-    } else {
-        run_status_env_reason("sh", &[&script], &[("TINA4_SKILLS_TARGET", target)])
-    };
-    let _ = fs::remove_dir_all(&stage);
-
-    if let Err(why) = &outcome {
-        // This line is the whole point of RunFailure. Without it a refresh that
-        // died at the spawn printed the skip below and nothing else, and the
-        // report that reached us had no cause attached to diagnose.
-        //
-        // No lead of its own: `why` already names the program and says whether
-        // it ran. A fixed lead read "The skills installer did not run" over the
-        // top of "sh ran and exited 127", which contradicted itself and was
-        // wrong about the machine whenever the installer had in fact started.
-        println!("  {} {}", icon_warn().yellow(), why);
-        println!(
-            "  {} Skills install skipped — run later: {}",
-            icon_warn().yellow(),
-            "tina4 ai".cyan()
-        );
-    }
-    outcome.is_ok()
+    crate::skills::install(target)
 }
 
 fn ensure_codex() {
@@ -1155,38 +952,102 @@ fn ensure_codex() {
     }
 }
 
-/// Write a per-project `.mcp.json` that wires Claude Code to the project's live
-/// MCP tools (`/__dev/mcp`, served by `tina4 serve`). Won't clobber an existing
-/// one. The dev-server port is per-language (python:7146, php:7145, ruby:7147,
-/// nodejs:7148).
-fn write_project_mcp_json(project_path: &Path, lang: &str, name: &str) {
-    let file = project_path.join(".mcp.json");
-    if file.exists() {
-        println!("  {} .mcp.json already present — left as-is", icon_info().blue());
-        return;
-    }
-    let port = match lang {
+/// The dev-server MCP port for a language. python:7146, php:7145, ruby:7147,
+/// nodejs:7148.
+fn dev_mcp_port(lang: &str) -> u16 {
+    match lang {
         "php" => 7145,
         "ruby" => 7147,
         "nodejs" => 7148,
         _ => 7146, // python + default
-    };
-    // Build the literal JSON without format! so the braces don't need escaping.
-    let url = "http://localhost:".to_string() + &port.to_string() + "/__dev/mcp/sse";
-    let mut content = String::new();
-    content.push_str("{\n");
-    content.push_str("  \"mcpServers\": {\n");
-    content.push_str("    \"");
-    content.push_str(name);
-    content.push_str("\": {\n");
-    content.push_str("      \"type\": \"sse\",\n");
-    content.push_str("      \"url\": \"");
-    content.push_str(&url);
-    content.push_str("\"\n");
-    content.push_str("    }\n");
-    content.push_str("  }\n");
-    content.push_str("}\n");
-    match fs::write(&file, content) {
+    }
+}
+
+/// The path Tina4's dev server serves the live MCP over. Streamable HTTP at the
+/// BARE path — modern Claude Code dropped the standalone `sse` transport, so the
+/// old `type:"sse"` + `/__dev/mcp/sse` shape can no longer be attached.
+const DEV_MCP_PATH: &str = "/__dev/mcp";
+/// The legacy path the pre-3.8.93 generator wrote (the sse transport). Its
+/// presence in an existing `.mcp.json` is the fingerprint of a stale
+/// Tina4-written config that this generator upgrades in place.
+const DEV_MCP_LEGACY_PATH: &str = "/__dev/mcp/sse";
+
+/// The canonical `.mcp.json` body for a fresh project: Streamable HTTP at the
+/// bare `/__dev/mcp` path.
+fn canonical_mcp_json(name: &str, port: u16) -> String {
+    // Built by hand (not serde) so the on-disk shape is stable and readable, and
+    // matches the `"type":"http"` form the docs document.
+    format!(
+        "{{\n  \"mcpServers\": {{\n    \"{name}\": {{\n      \"type\": \"http\",\n      \"url\": \"http://localhost:{port}{DEV_MCP_PATH}\"\n    }}\n  }}\n}}\n"
+    )
+}
+
+/// Upgrade a stale Tina4 `.mcp.json` (a `type:"sse"` server pointing at
+/// `/__dev/mcp/sse`) to the Streamable HTTP form, preserving every other server
+/// and field. Returns the new JSON text, or `None` when nothing in the file
+/// carries the Tina4 legacy fingerprint — in which case the config is a user's
+/// own and must be left untouched.
+fn upgrade_stale_mcp_json(existing: &str) -> Option<String> {
+    let mut doc: serde_json::Value = serde_json::from_str(existing).ok()?;
+    let servers = doc.get_mut("mcpServers")?.as_object_mut()?;
+    let mut upgraded = false;
+    for server in servers.values_mut() {
+        let Some(entry) = server.as_object_mut() else { continue };
+        let is_legacy_url = entry
+            .get("url")
+            .and_then(|u| u.as_str())
+            .is_some_and(|u| u.ends_with(DEV_MCP_LEGACY_PATH));
+        if !is_legacy_url {
+            continue;
+        }
+        // Only OUR generated shape carries both the legacy path AND the sse type;
+        // require both so a user who deliberately points sse elsewhere, or http at
+        // our path, is never rewritten.
+        let is_sse = entry.get("type").and_then(|t| t.as_str()) == Some("sse");
+        if !is_sse {
+            continue;
+        }
+        if let Some(url) = entry.get("url").and_then(|u| u.as_str()) {
+            let http_url = url.trim_end_matches(DEV_MCP_LEGACY_PATH).to_string() + DEV_MCP_PATH;
+            entry.insert("url".to_string(), serde_json::Value::String(http_url));
+        }
+        entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
+        upgraded = true;
+    }
+    if upgraded {
+        Some(serde_json::to_string_pretty(&doc).ok()? + "\n")
+    } else {
+        None
+    }
+}
+
+/// Write a per-project `.mcp.json` that wires Claude Code to the project's live
+/// MCP tools (`/__dev/mcp`, served by `tina4 serve`) over Streamable HTTP.
+///
+/// A fresh project gets the canonical `type:"http"` config. An existing file is
+/// only touched when it carries the Tina4 legacy fingerprint (a `type:"sse"`
+/// server at `/__dev/mcp/sse`, written before 3.8.93 and no longer attachable by
+/// modern Claude Code): that one is upgraded in place to Streamable HTTP. Any
+/// other existing config — a user's own — is left exactly as it is.
+fn write_project_mcp_json(project_path: &Path, lang: &str, name: &str) {
+    let file = project_path.join(".mcp.json");
+    let port = dev_mcp_port(lang);
+
+    if file.exists() {
+        match fs::read_to_string(&file).ok().and_then(|c| upgrade_stale_mcp_json(&c)) {
+            Some(upgraded) => match fs::write(&file, upgraded) {
+                Ok(_) => println!(
+                    "  {} Upgraded .mcp.json to Streamable HTTP (was the legacy sse transport)",
+                    icon_ok().green()
+                ),
+                Err(e) => eprintln!("  {} Could not upgrade .mcp.json: {}", icon_warn().yellow(), e),
+            },
+            None => println!("  {} .mcp.json already present — left as-is", icon_info().blue()),
+        }
+        return;
+    }
+
+    match fs::write(&file, canonical_mcp_json(name, port)) {
         Ok(_) => println!(
             "  {} Wrote .mcp.json (Claude Code → live tina4 tools at /__dev/mcp)",
             icon_ok().green()
@@ -1652,106 +1513,68 @@ mod tests {
         assert_eq!(ai_from_str(ai_to_str(AiChoice::All)), AiChoice::All);
     }
 
-    /// The installer has to be reachable from more than one host. A single
-    /// source is what a 503 from raw.githubusercontent.com turned into a
-    /// failed `tina4 update`, and collapsing these lists back onto one host
-    /// -- or onto two URLs at the same host -- brings that back.
-    #[test]
-    fn the_skills_installer_has_a_second_host_to_fall_back_to() {
-        for sources in [&SKILLS_INSTALLER_SOURCES_SH, &SKILLS_INSTALLER_SOURCES_PS1] {
-            let hosts: std::collections::BTreeSet<&str> = sources
-                .iter()
-                .map(|url| url.split('/').nth(2).expect("every source is an absolute URL"))
-                .collect();
-            assert!(
-                hosts.len() > 1,
-                "every installer source resolves to one host: {:?}",
-                sources
-            );
-        }
+    fn temp_project(label: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("tina4-mcp-{}-{label}-{stamp}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
-    /// Both platforms must fetch the same installer, or a fix proven on one
-    /// silently misses the other.
+    /// A fresh project gets Streamable HTTP at the bare `/__dev/mcp` path — never
+    /// the sse transport modern Claude Code can no longer attach.
     #[test]
-    fn both_platforms_draw_on_the_same_set_of_hosts() {
-        let hosts = |sources: &[&str]| -> Vec<String> {
-            sources
-                .iter()
-                .map(|url| url.split('/').nth(2).unwrap().to_string())
-                .collect()
-        };
-        assert_eq!(
-            hosts(&SKILLS_INSTALLER_SOURCES_SH),
-            hosts(&SKILLS_INSTALLER_SOURCES_PS1)
+    fn fresh_project_gets_streamable_http_mcp() {
+        let dir = temp_project("fresh");
+        write_project_mcp_json(&dir, "nodejs", "my-app");
+        let written = fs::read_to_string(dir.join(".mcp.json")).unwrap();
+        assert!(written.contains("\"type\": \"http\""), "not http:\n{written}");
+        assert!(
+            written.contains("http://localhost:7148/__dev/mcp\""),
+            "wrong url (port or /sse):\n{written}"
         );
+        assert!(!written.contains("/__dev/mcp/sse"), "still the sse endpoint:\n{written}");
+        assert!(!written.contains("\"sse\""), "still the sse type:\n{written}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The staged path is interpolated into a single-quoted PowerShell string.
-    /// A Windows username with an apostrophe would otherwise end the string and
-    /// leave the rest of the path to be parsed as code.
+    /// A stale Tina4 config (the pre-3.8.93 sse shape) is upgraded in place.
     #[test]
-    fn a_quote_in_the_staging_path_cannot_escape_the_powershell_string() {
-        assert_eq!(ps_single_quote(Path::new("/tmp/plain")), "/tmp/plain");
-        assert_eq!(
-            ps_single_quote(Path::new("/tmp/o'brien/install-skills.ps1")),
-            "/tmp/o''brien/install-skills.ps1"
-        );
+    fn stale_tina4_sse_config_is_upgraded_in_place() {
+        let dir = temp_project("stale");
+        let legacy = "{\n  \"mcpServers\": {\n    \"tina4-python\": {\n      \"type\": \"sse\",\n      \"url\": \"http://localhost:7146/__dev/mcp/sse\"\n    }\n  }\n}\n";
+        fs::write(dir.join(".mcp.json"), legacy).unwrap();
+        write_project_mcp_json(&dir, "python", "tina4-python");
+        let upgraded = fs::read_to_string(dir.join(".mcp.json")).unwrap();
+        assert!(upgraded.contains("\"type\": \"http\""), "not upgraded to http:\n{upgraded}");
+        assert!(upgraded.contains("http://localhost:7146/__dev/mcp"), "url wrong:\n{upgraded}");
+        assert!(!upgraded.contains("/__dev/mcp/sse"), "sse endpoint survived:\n{upgraded}");
+        assert!(!upgraded.contains("\"sse\""), "sse type survived:\n{upgraded}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A real Windows box refused the installer with "Cannot convert
-    /// 'System.Byte[]' to the type 'System.String' required by parameter
-    /// 'Command'": `Get-Content -Raw` had handed `iex` a byte array. The
-    /// command must read the installer as TEXT via [System.IO.File]::ReadAllText
-    /// (always a String), still over `iex` (not `-File`), and never reach for
-    /// Get-Content again.
+    /// A config that is NOT the Tina4 legacy shape (a user's own server, or one
+    /// already on http) is left exactly as it is.
     #[test]
-    fn the_windows_installer_is_read_as_text_not_bytes() {
-        let cmd = windows_skills_command("codex", Path::new("/tmp/t/install-skills.ps1"));
-        assert!(
-            cmd.contains("iex ([System.IO.File]::ReadAllText('/tmp/t/install-skills.ps1'))"),
-            "must read text and iex it: {cmd}"
-        );
-        assert!(
-            !cmd.contains("Get-Content"),
-            "Get-Content -Raw can yield a byte[] that iex refuses: {cmd}"
-        );
-        assert!(
-            !cmd.contains("-File"),
-            "-File would reimpose execution policy + mark-of-the-web: {cmd}"
-        );
-        assert!(
-            cmd.contains("$env:TINA4_SKILLS_TARGET='codex'"),
-            "target must reach the installer: {cmd}"
-        );
+    fn non_tina4_mcp_config_is_left_untouched() {
+        let dir = temp_project("user");
+        let user = "{\n  \"mcpServers\": {\n    \"my-own\": {\n      \"type\": \"sse\",\n      \"url\": \"http://localhost:9000/custom/sse\"\n    }\n  }\n}\n";
+        fs::write(dir.join(".mcp.json"), user).unwrap();
+        write_project_mcp_json(&dir, "python", "tina4-python");
+        assert_eq!(fs::read_to_string(dir.join(".mcp.json")).unwrap(), user, "a user config was rewritten");
+        let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The staged path is single-quoted inside the command, so a Windows
-    /// username with an apostrophe cannot end the string and run the tail as code.
+    /// The upgrade preserves other servers in a mixed config while fixing ours.
     #[test]
-    fn the_windows_command_single_quotes_the_installer_path() {
-        let cmd = windows_skills_command("all", Path::new("/tmp/o'brien/install-skills.ps1"));
-        assert!(
-            cmd.contains("ReadAllText('/tmp/o''brien/install-skills.ps1')"),
-            "apostrophe must be doubled inside the single-quoted arg: {cmd}"
-        );
-    }
-
-    /// Retrying is worth the wait only while it stays bounded. `curl` is run
-    /// without a timeout here, so the ceiling is what keeps six attempts from
-    /// costing six hangs.
-    #[test]
-    fn the_fetch_walk_is_bounded() {
-        assert!(SKILLS_FETCH_ATTEMPTS >= 2, "one attempt is what broke");
-        let worst_case_sleep = SKILLS_FETCH_DELAY
-            * (SKILLS_FETCH_ATTEMPTS - 1)
-            * SKILLS_INSTALLER_SOURCES_SH.len() as u32;
-        assert!(
-            worst_case_sleep < SKILLS_FETCH_BUDGET,
-            "the sleeps alone exhaust the budget: {:?} >= {:?}",
-            worst_case_sleep,
-            SKILLS_FETCH_BUDGET
-        );
+    fn upgrade_preserves_sibling_servers() {
+        let mixed = "{\"mcpServers\":{\"tina4-python\":{\"type\":\"sse\",\"url\":\"http://localhost:7146/__dev/mcp/sse\"},\"other\":{\"type\":\"sse\",\"url\":\"http://localhost:9000/custom/sse\"}}}";
+        let upgraded = upgrade_stale_mcp_json(mixed).expect("should upgrade the tina4 entry");
+        assert!(upgraded.contains("http://localhost:7146/__dev/mcp\""));
+        // The sibling's own sse endpoint is untouched.
+        assert!(upgraded.contains("http://localhost:9000/custom/sse"));
     }
 }
 
@@ -1863,22 +1686,6 @@ fn run_to_completion(program: &str, command: &mut Command) -> Result<(), RunFail
             source,
         }),
     }
-}
-
-/// `run_status_reason` with extra environment for the child, and paths passed as
-/// arguments rather than interpolated into a shell string -- a temp directory
-/// containing a space or a quote is then just a path, not a syntax error.
-fn run_status_env_reason(
-    cmd: &str,
-    args: &[&Path],
-    env: &[(&str, &str)],
-) -> Result<(), RunFailure> {
-    let mut command = Command::new(cmd);
-    command.args(args);
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    run_to_completion(cmd, &mut command)
 }
 
 fn run_status_reason(cmd: &str, args: &[&str]) -> Result<(), RunFailure> {

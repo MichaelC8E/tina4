@@ -127,14 +127,17 @@ fn the_repaired_sites_still_resolve_before_spawning() {
             calls.insert(relative(&file), n);
         }
     }
-    // setup.rs: the skills spawn, the UAC relaunch, the Claude Code installer.
+    // setup.rs: the UAC relaunch and the Claude Code installer. (The skills
+    // refresh used to be a third, spawning PowerShell to `iex` the downloaded
+    // install-skills.ps1; that spawn was blocked by Windows Defender/ASR and is
+    // now the in-process native installer in src/skills.rs, which spawns nothing.)
     // main.rs: the download fallback (reached when C:\Windows\System32\curl.exe
     // is absent -- exactly the machine this resolution exists for), plus the
     // self-update checksum hash (Get-FileHash) that verifies the downloaded
     // binary before it overwrites the running CLI.
     assert_eq!(
         calls.get("src/setup.rs").copied().unwrap_or(0),
-        3,
+        2,
         "a spawn in setup.rs stopped resolving PowerShell before spawning it"
     );
     assert_eq!(
