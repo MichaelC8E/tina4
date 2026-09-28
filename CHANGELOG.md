@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 3.8.93 — 2026-09-28
 
+- fix(skills): the AI-skills install/refresh now runs fully in-process (native Rust: fetch + `ring` SHA-256 verify + direct writes) instead of shelling out to PowerShell to `iex` a downloaded script. On Windows that PowerShell-download-execute shape from a freshly-updated binary was blocked by Defender/ASR with `os error 225` ("the file contains a virus or potentially unwanted software"), which broke `tina4 update`'s skills refresh; the tina4 binary itself was always correctly EV-signed. No new crates.
+- fix(mcp): the generated `.mcp.json` now uses the Streamable HTTP transport (`"type":"http"`, `/__dev/mcp`) instead of the dropped legacy `sse` transport, so modern Claude Code attaches the project's live `/__dev/mcp` tools; a stale Tina4-written `sse` config is upgraded in place, a user's own config is left untouched.
 - test(release): cover the SPDX SBOM generator with a real-run test (`tests/test_release_inventory.py`). It builds the inventory from the actual lockfile and asserts the document names the `tina4` package and its dependencies, and it proves the generator refuses an unsound graph. `scripts/release-inventory.py` gains a pure `build_document` seam so the trust boundary is testable without mocks; the emitted release bytes are unchanged.
 
 ## 3.8.92 — 2026-09-26
