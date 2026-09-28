@@ -952,38 +952,102 @@ fn ensure_codex() {
     }
 }
 
-/// Write a per-project `.mcp.json` that wires Claude Code to the project's live
-/// MCP tools (`/__dev/mcp`, served by `tina4 serve`). Won't clobber an existing
-/// one. The dev-server port is per-language (python:7146, php:7145, ruby:7147,
-/// nodejs:7148).
-fn write_project_mcp_json(project_path: &Path, lang: &str, name: &str) {
-    let file = project_path.join(".mcp.json");
-    if file.exists() {
-        println!("  {} .mcp.json already present — left as-is", icon_info().blue());
-        return;
-    }
-    let port = match lang {
+/// The dev-server MCP port for a language. python:7146, php:7145, ruby:7147,
+/// nodejs:7148.
+fn dev_mcp_port(lang: &str) -> u16 {
+    match lang {
         "php" => 7145,
         "ruby" => 7147,
         "nodejs" => 7148,
         _ => 7146, // python + default
-    };
-    // Build the literal JSON without format! so the braces don't need escaping.
-    let url = "http://localhost:".to_string() + &port.to_string() + "/__dev/mcp/sse";
-    let mut content = String::new();
-    content.push_str("{\n");
-    content.push_str("  \"mcpServers\": {\n");
-    content.push_str("    \"");
-    content.push_str(name);
-    content.push_str("\": {\n");
-    content.push_str("      \"type\": \"sse\",\n");
-    content.push_str("      \"url\": \"");
-    content.push_str(&url);
-    content.push_str("\"\n");
-    content.push_str("    }\n");
-    content.push_str("  }\n");
-    content.push_str("}\n");
-    match fs::write(&file, content) {
+    }
+}
+
+/// The path Tina4's dev server serves the live MCP over. Streamable HTTP at the
+/// BARE path — modern Claude Code dropped the standalone `sse` transport, so the
+/// old `type:"sse"` + `/__dev/mcp/sse` shape can no longer be attached.
+const DEV_MCP_PATH: &str = "/__dev/mcp";
+/// The legacy path the pre-3.8.93 generator wrote (the sse transport). Its
+/// presence in an existing `.mcp.json` is the fingerprint of a stale
+/// Tina4-written config that this generator upgrades in place.
+const DEV_MCP_LEGACY_PATH: &str = "/__dev/mcp/sse";
+
+/// The canonical `.mcp.json` body for a fresh project: Streamable HTTP at the
+/// bare `/__dev/mcp` path.
+fn canonical_mcp_json(name: &str, port: u16) -> String {
+    // Built by hand (not serde) so the on-disk shape is stable and readable, and
+    // matches the `"type":"http"` form the docs document.
+    format!(
+        "{{\n  \"mcpServers\": {{\n    \"{name}\": {{\n      \"type\": \"http\",\n      \"url\": \"http://localhost:{port}{DEV_MCP_PATH}\"\n    }}\n  }}\n}}\n"
+    )
+}
+
+/// Upgrade a stale Tina4 `.mcp.json` (a `type:"sse"` server pointing at
+/// `/__dev/mcp/sse`) to the Streamable HTTP form, preserving every other server
+/// and field. Returns the new JSON text, or `None` when nothing in the file
+/// carries the Tina4 legacy fingerprint — in which case the config is a user's
+/// own and must be left untouched.
+fn upgrade_stale_mcp_json(existing: &str) -> Option<String> {
+    let mut doc: serde_json::Value = serde_json::from_str(existing).ok()?;
+    let servers = doc.get_mut("mcpServers")?.as_object_mut()?;
+    let mut upgraded = false;
+    for server in servers.values_mut() {
+        let Some(entry) = server.as_object_mut() else { continue };
+        let is_legacy_url = entry
+            .get("url")
+            .and_then(|u| u.as_str())
+            .is_some_and(|u| u.ends_with(DEV_MCP_LEGACY_PATH));
+        if !is_legacy_url {
+            continue;
+        }
+        // Only OUR generated shape carries both the legacy path AND the sse type;
+        // require both so a user who deliberately points sse elsewhere, or http at
+        // our path, is never rewritten.
+        let is_sse = entry.get("type").and_then(|t| t.as_str()) == Some("sse");
+        if !is_sse {
+            continue;
+        }
+        if let Some(url) = entry.get("url").and_then(|u| u.as_str()) {
+            let http_url = url.trim_end_matches(DEV_MCP_LEGACY_PATH).to_string() + DEV_MCP_PATH;
+            entry.insert("url".to_string(), serde_json::Value::String(http_url));
+        }
+        entry.insert("type".to_string(), serde_json::Value::String("http".to_string()));
+        upgraded = true;
+    }
+    if upgraded {
+        Some(serde_json::to_string_pretty(&doc).ok()? + "\n")
+    } else {
+        None
+    }
+}
+
+/// Write a per-project `.mcp.json` that wires Claude Code to the project's live
+/// MCP tools (`/__dev/mcp`, served by `tina4 serve`) over Streamable HTTP.
+///
+/// A fresh project gets the canonical `type:"http"` config. An existing file is
+/// only touched when it carries the Tina4 legacy fingerprint (a `type:"sse"`
+/// server at `/__dev/mcp/sse`, written before 3.8.93 and no longer attachable by
+/// modern Claude Code): that one is upgraded in place to Streamable HTTP. Any
+/// other existing config — a user's own — is left exactly as it is.
+fn write_project_mcp_json(project_path: &Path, lang: &str, name: &str) {
+    let file = project_path.join(".mcp.json");
+    let port = dev_mcp_port(lang);
+
+    if file.exists() {
+        match fs::read_to_string(&file).ok().and_then(|c| upgrade_stale_mcp_json(&c)) {
+            Some(upgraded) => match fs::write(&file, upgraded) {
+                Ok(_) => println!(
+                    "  {} Upgraded .mcp.json to Streamable HTTP (was the legacy sse transport)",
+                    icon_ok().green()
+                ),
+                Err(e) => eprintln!("  {} Could not upgrade .mcp.json: {}", icon_warn().yellow(), e),
+            },
+            None => println!("  {} .mcp.json already present — left as-is", icon_info().blue()),
+        }
+        return;
+    }
+
+    match fs::write(&file, canonical_mcp_json(name, port)) {
         Ok(_) => println!(
             "  {} Wrote .mcp.json (Claude Code → live tina4 tools at /__dev/mcp)",
             icon_ok().green()
@@ -1449,7 +1513,71 @@ mod tests {
         assert_eq!(ai_from_str(ai_to_str(AiChoice::All)), AiChoice::All);
     }
 
+    fn temp_project(label: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("tina4-mcp-{}-{label}-{stamp}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A fresh project gets Streamable HTTP at the bare `/__dev/mcp` path — never
+    /// the sse transport modern Claude Code can no longer attach.
+    #[test]
+    fn fresh_project_gets_streamable_http_mcp() {
+        let dir = temp_project("fresh");
+        write_project_mcp_json(&dir, "nodejs", "my-app");
+        let written = fs::read_to_string(dir.join(".mcp.json")).unwrap();
+        assert!(written.contains("\"type\": \"http\""), "not http:\n{written}");
+        assert!(
+            written.contains("http://localhost:7148/__dev/mcp\""),
+            "wrong url (port or /sse):\n{written}"
+        );
+        assert!(!written.contains("/__dev/mcp/sse"), "still the sse endpoint:\n{written}");
+        assert!(!written.contains("\"sse\""), "still the sse type:\n{written}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A stale Tina4 config (the pre-3.8.93 sse shape) is upgraded in place.
+    #[test]
+    fn stale_tina4_sse_config_is_upgraded_in_place() {
+        let dir = temp_project("stale");
+        let legacy = "{\n  \"mcpServers\": {\n    \"tina4-python\": {\n      \"type\": \"sse\",\n      \"url\": \"http://localhost:7146/__dev/mcp/sse\"\n    }\n  }\n}\n";
+        fs::write(dir.join(".mcp.json"), legacy).unwrap();
+        write_project_mcp_json(&dir, "python", "tina4-python");
+        let upgraded = fs::read_to_string(dir.join(".mcp.json")).unwrap();
+        assert!(upgraded.contains("\"type\": \"http\""), "not upgraded to http:\n{upgraded}");
+        assert!(upgraded.contains("http://localhost:7146/__dev/mcp"), "url wrong:\n{upgraded}");
+        assert!(!upgraded.contains("/__dev/mcp/sse"), "sse endpoint survived:\n{upgraded}");
+        assert!(!upgraded.contains("\"sse\""), "sse type survived:\n{upgraded}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A config that is NOT the Tina4 legacy shape (a user's own server, or one
+    /// already on http) is left exactly as it is.
+    #[test]
+    fn non_tina4_mcp_config_is_left_untouched() {
+        let dir = temp_project("user");
+        let user = "{\n  \"mcpServers\": {\n    \"my-own\": {\n      \"type\": \"sse\",\n      \"url\": \"http://localhost:9000/custom/sse\"\n    }\n  }\n}\n";
+        fs::write(dir.join(".mcp.json"), user).unwrap();
+        write_project_mcp_json(&dir, "python", "tina4-python");
+        assert_eq!(fs::read_to_string(dir.join(".mcp.json")).unwrap(), user, "a user config was rewritten");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The upgrade preserves other servers in a mixed config while fixing ours.
+    #[test]
+    fn upgrade_preserves_sibling_servers() {
+        let mixed = "{\"mcpServers\":{\"tina4-python\":{\"type\":\"sse\",\"url\":\"http://localhost:7146/__dev/mcp/sse\"},\"other\":{\"type\":\"sse\",\"url\":\"http://localhost:9000/custom/sse\"}}}";
+        let upgraded = upgrade_stale_mcp_json(mixed).expect("should upgrade the tina4 entry");
+        assert!(upgraded.contains("http://localhost:7146/__dev/mcp\""));
+        // The sibling's own sse endpoint is untouched.
+        assert!(upgraded.contains("http://localhost:9000/custom/sse"));
+    }
 }
+
 /// Is the runtime for this language already on the machine? Lets quick runs
 /// skip the package-manager / elevation dance unless a new language was picked.
 fn runtime_present(lang: &str) -> bool {
