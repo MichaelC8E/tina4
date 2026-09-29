@@ -56,6 +56,10 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # Author the manifest branch push/PR with a PAT, not GITHUB_TOKEN:
+          # a PR opened by GITHUB_TOKEN does not trigger the required checks
+          # (recursion prevention), leaving the manifest PR permanently blocked.
+          token: ${{ secrets.MANIFEST_PR_TOKEN }}
 
       - name: Resolve tag + version
         id: ver
@@ -85,7 +89,9 @@ jobs:
       # below use the rendered artifact, so they never wait on this PR.
       - name: Open a PR with the bumped manifests
         env:
-          GH_TOKEN: ${{ github.token }}
+          # MANIFEST_PR_TOKEN (a PAT), not github.token — so the PR is authored
+          # by a real identity and the required checks actually run on it.
+          GH_TOKEN: ${{ secrets.MANIFEST_PR_TOKEN }}
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -eu
