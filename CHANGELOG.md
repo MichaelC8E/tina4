@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.8.94 — 2026-09-29
+
+- fix(deploy): the generated deploy images pin every base image by digest, run as a non-root user, and stop baking secrets into layers. A build no longer carries a `latest` tag it cannot pin down, and a secret handed in at build time won't survive into the shipped image (#42).
+- fix(release): self-update now verifies each download against its checksum before it swaps the binary, and refuses a downgrade instead of walking backwards. When Windows signing runs it patches only the signed exe's checksum line and leaves the others alone. The publish jobs wait behind a protected `release` environment (ADR-0081) (#40).
+- fix(installers,scaffold): installs fail closed — the installer checks the checksum first and only then promotes the download into place. Each scaffold now writes its own random `TINA4_SECRET` instead of a shared placeholder, so a fresh project can't ship the same guessable secret as every other one (F8) (#41).
+- fix(lint): the async-route lint flags a synchronous database call inside an `async` route (ADR-0074), the thing that actually blocks the loop, instead of the old heuristic that just demanded every handler be async (#39).
+- chore(packaging): sync the Scoop, Homebrew, Chocolatey, and winget manifests to the release (#51).
+
 ## 3.8.93 — 2026-09-28
 
 - fix(skills): the AI-skills install/refresh now runs fully in-process (native Rust: fetch + `ring` SHA-256 verify + direct writes) instead of shelling out to PowerShell to `iex` a downloaded script. On Windows that PowerShell-download-execute shape from a freshly-updated binary was blocked by Defender/ASR with `os error 225` ("the file contains a virus or potentially unwanted software"), which broke `tina4 update`'s skills refresh; the tina4 binary itself was always correctly EV-signed. No new crates.
