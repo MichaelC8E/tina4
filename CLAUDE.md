@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.93 — Unified CLI for Python, PHP, Ruby, Node.js, and tina4-js projects.
+Version 3.8.94 — Unified CLI for Python, PHP, Ruby, Node.js, and tina4-js projects.
 
 ## Build & Test
 
