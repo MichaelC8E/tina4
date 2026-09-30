@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.8.95 — 2026-09-30
+
+- feat(metrics): `tina4 metrics --fail-on-regression` — a ratchet CI gate that exits 1 when a scan is measurably worse than the committed `.tina4-metrics.json` baseline: a new offender file, more offenders on a file, a worse worst-case complexity on a file that still offends, or more duplicated lines. It reuses the same "Since last run" classification, so it never fails on movement the report already prints as clean or improved. It is read-only on the baseline — a check never advances the ratchet, so re-baselining stays a deliberate plain `tina4 metrics` run you then commit — warns and passes when there is no baseline, and cannot combine with `--no-history`. Preferred over `--fail-on error` for a cross-framework gate, whose absolute severity bar fires on inherent file-size maintainability and pre-existing sub-40 complexity (#55).
+
 ## 3.8.94 — 2026-09-29
 
 - fix(deploy): the generated deploy images pin every base image by digest, run as a non-root user, and stop baking secrets into layers. A build no longer carries a `latest` tag it cannot pin down, and a secret handed in at build time won't survive into the shipped image (#42).
