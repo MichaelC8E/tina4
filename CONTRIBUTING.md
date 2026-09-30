@@ -15,6 +15,10 @@ https://tina4.com/general/contributing.html - this is the short version.
 - **Sign off every commit** with `git commit -s`, and agree to the
   [Contributor Licence Agreement](https://tina4.com/general/contributor-licence-agreement.html)
   on your first pull request.
+- **No hidden or broken files.** Run `sh scripts/check-repo-hygiene.sh` before you push;
+  CI runs the same gate. It refuses committed symlinks, dangling links, zero-byte files,
+  editor/OS/merge-leftover junk, and NUL bytes in source — the things that pass review
+  unseen and break a consumer later.
 - **Security issues stay private.** Don't open an issue or pull request about a
   vulnerability - follow [SECURITY.md](SECURITY.md) and the
   [security research policy](https://tina4.com/general/security-research.html).
