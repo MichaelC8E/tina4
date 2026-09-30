@@ -50,7 +50,8 @@ tina4 routes                     List registered routes
 tina4 metrics                    Report code-health top offenders (complexity, large files,
                                  low maintainability, missing test references, duplication).
                                  Flags: --top N, --json, --fail-on warn|error (CI gate),
-                                 --path DIR|FILE, repeatable --exclude GLOB,
+                                 --fail-on-regression (ratchet CI gate), --path DIR|FILE,
+                                 repeatable --exclude GLOB,
                                  --include-non-production, and --no-history. RUN HISTORY
                                  (3.8.80): each scan records .tina4-metrics.json in the
                                  scan root, and the next scan of the same scope reports a
@@ -61,6 +62,22 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  retains full per-file metric snapshots for a bounded
                                  commit-friendly changelog; delete `.tina4-metrics.json`
                                  to clear it.
+                                 REGRESSION GATE (3.8.95): `--fail-on-regression` exits 1
+                                 when this scan is measurably WORSE than the committed
+                                 `.tina4-metrics.json` baseline — a new offender file, more
+                                 offenders on a file, a worse worst-case complexity on a file
+                                 that still offends, or more duplicated lines — reusing the
+                                 same "Since last run" classification so it never fails on
+                                 movement the report calls clean/improved. It is READ-ONLY on
+                                 the baseline (a check never advances the ratchet), so
+                                 re-baselining is a deliberate plain `tina4 metrics` run whose
+                                 `.tina4-metrics.json` you then commit. No baseline = nothing
+                                 to gate (it warns and passes); cannot combine with
+                                 --no-history. Independent of --fail-on; either may trip the
+                                 exit. This is the structural CI gate wired across all four
+                                 frameworks (ADR-0002); it is preferred over `--fail-on error`,
+                                 whose absolute severity bar fires on inherent file-size
+                                 maintainability and pre-existing sub-40 complexity.
                                  `--path` accepts any supported source directory or file;
                                  it does not require a Tina4 project. Use repeatable
                                  `--exclude` switches for project-specific generated or
