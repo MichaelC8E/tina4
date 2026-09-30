@@ -2647,6 +2647,42 @@ fn compute_exit_code(fail_on: Option<&str>, has_warn: bool, has_error: bool) -> 
     }
 }
 
+/// `--fail-on-regression` gate: the concrete reasons this scan is WORSE than the
+/// committed baseline, or empty if it is not. Deliberately reuses the changelog's
+/// own `regressed_files` classification (a new file carrying an offender, more
+/// offenders on a file, or a worse worst-case complexity on a file that still
+/// offends) so the gate can never fail on movement the "Since last run" report
+/// prints as clean or improved. Adds one summary axis the per-file pass does not
+/// cover: a rise in duplicated lines, so the de-duplication win is ratcheted too.
+/// Each returned string is a human-readable line naming exactly what regressed.
+fn regression_reasons(delta: &RunDelta) -> Vec<String> {
+    let mut reasons = Vec::new();
+    for f in &delta.regressed_files {
+        if f.status == "new" {
+            reasons.push(format!(
+                "{}  NEW file with {} offender(s) (worst CC {})",
+                f.path, f.offenders_after, f.worst_cc_after
+            ));
+        } else {
+            reasons.push(format!(
+                "{}  offenders {}->{}, worst CC {}->{}",
+                f.path, f.offenders_before, f.offenders_after, f.worst_cc_before, f.worst_cc_after
+            ));
+        }
+    }
+    // Duplication is a cross-file summary metric: the per-file pass classifies a
+    // duplication change as "changed", never "regressed", so gate it here.
+    if delta.after.duplicate_lines > delta.before.duplicate_lines {
+        reasons.push(format!(
+            "duplicated lines {}->{} (+{})",
+            delta.before.duplicate_lines,
+            delta.after.duplicate_lines,
+            delta.after.duplicate_lines - delta.before.duplicate_lines
+        ));
+    }
+    reasons
+}
+
 // ── Run history: regression / improvement tracking ──────────────────────────
 // Every scan records a summary plus full per-file snapshots to
 // `.tina4-metrics.json` in the scan root, so the NEXT run of the same scope can
@@ -3129,21 +3165,41 @@ fn human_age(secs: u64) -> String {
     }
 }
 
+/// Everything `tina4 metrics` needs to run one scan. Grouped into a struct so
+/// the entry point stays a single argument as flags accrue (each new flag would
+/// otherwise push `run` past clippy's argument-count limit).
+pub struct RunOptions {
+    pub path: Option<String>,
+    pub top: Option<usize>,
+    pub json: bool,
+    pub fail_on: Option<String>,
+    pub exclusions: Vec<String>,
+    pub include_non_production: bool,
+    pub no_history: bool,
+    pub fail_on_regression: bool,
+}
+
 /// `tina4 metrics` — native, language-agnostic. Returns the process exit code.
-pub fn run(
-    path: Option<String>,
-    top: Option<usize>,
-    json: bool,
-    fail_on: Option<String>,
-    exclusions: Vec<String>,
-    include_non_production: bool,
-    no_history: bool,
-) -> i32 {
+pub fn run(opts: RunOptions) -> i32 {
+    let RunOptions {
+        path,
+        top,
+        json,
+        fail_on,
+        exclusions,
+        include_non_production,
+        no_history,
+        fail_on_regression,
+    } = opts;
     if let Some(f) = &fail_on {
         if f != "warn" && f != "error" {
             eprintln!("  invalid --fail-on '{f}' (use warn or error)");
             return 2;
         }
+    }
+    if fail_on_regression && no_history {
+        eprintln!("  --fail-on-regression needs the baseline, so it cannot be combined with --no-history");
+        return 2;
     }
     let top = top.unwrap_or(20);
 
@@ -3184,7 +3240,47 @@ pub fn run(
     // Exit code from the FULL offender set (before top truncation).
     let has_warn = report.offenders.iter().any(|o| o.severity == "warn");
     let has_error = report.offenders.iter().any(|o| o.severity == "error");
-    let exit_code = compute_exit_code(fail_on.as_deref(), has_warn, has_error);
+    let mut exit_code = compute_exit_code(fail_on.as_deref(), has_warn, has_error);
+
+    // `--fail-on-regression`: the ratchet gate. Trips only against a committed
+    // baseline; with no baseline there is nothing to regress against, so it warns
+    // and passes (the first run, or a repo that has not committed one yet).
+    let regression: Option<Vec<String>> = if fail_on_regression {
+        match &delta {
+            Some(d) => {
+                let reasons = regression_reasons(d);
+                if !reasons.is_empty() {
+                    exit_code = 1;
+                }
+                Some(reasons)
+            }
+            None => {
+                eprintln!(
+                    "  --fail-on-regression: no baseline at {} to compare against - nothing to gate. Commit a baseline first (run `tina4 metrics` and commit the file).",
+                    history_path(&scan_root).display()
+                );
+                Some(Vec::new())
+            }
+        }
+    } else {
+        None
+    };
+
+    // Regression verdict to stderr, so `--json` keeps a clean machine-readable
+    // stdout while a human (and CI) still sees exactly what tripped the gate.
+    if let Some(reasons) = &regression {
+        if reasons.is_empty() {
+            if delta.is_some() {
+                eprintln!("  metrics: no regression against the baseline.");
+            }
+        } else {
+            eprintln!("  metrics REGRESSION vs baseline ({} item(s)) - failing:", reasons.len());
+            for r in reasons {
+                eprintln!("    - {r}");
+            }
+            eprintln!("  If this is intended, re-baseline: run `tina4 metrics` and commit the updated {}.", HISTORY_FILE);
+        }
+    }
 
     let shown: Vec<Offender> = report.offenders.iter().take(top).cloned().collect();
 
@@ -3206,7 +3302,10 @@ pub fn run(
             delta,
         };
         println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
-        if !no_history {
+        // `--fail-on-regression` is a read-only CHECK against the committed
+        // baseline: it never advances the ratchet, so a local check cannot
+        // silently move the bar. Re-baselining is a deliberate plain scan.
+        if !no_history && !fail_on_regression {
             save_history(&scan_root, history_prev, cur_snapshot, cur_files);
         }
         return exit_code;
@@ -3215,13 +3314,13 @@ pub fn run(
     print_human(&summary, &shown);
     match &delta {
         Some(d) => print_delta_human(d, &scan_root),
-        None if !no_history => println!(
+        None if !no_history && !fail_on_regression => println!(
             "\n  Baseline saved to {} - rerun to see what changed.",
             history_path(&scan_root).display()
         ),
         None => {}
     }
-    if !no_history {
+    if !no_history && !fail_on_regression {
         save_history(&scan_root, history_prev, cur_snapshot, cur_files);
     }
     exit_code
@@ -4000,6 +4099,60 @@ pub fn sub(a: i32, b: i32) -> i32 {
         assert_eq!(compute_exit_code(Some("warn"), false, true), 1);
         assert_eq!(compute_exit_code(Some("error"), true, false), 0);
         assert_eq!(compute_exit_code(Some("error"), false, true), 1);
+    }
+
+    #[test]
+    fn regression_gate_reasons() {
+        let snap = |offenders: usize, dup_lines: usize| MetricsSnapshot {
+            at: 0,
+            tool_version: "test".into(),
+            files_analyzed: 1,
+            total_functions: 1,
+            avg_complexity: 1.0,
+            avg_maintainability: 100.0,
+            total_offenders: offenders,
+            duplicate_blocks: 0,
+            duplicate_lines: dup_lines,
+        };
+        let fd = |path: &str, ob: i64, oa: i64, wb: i64, wa: i64, status: &str| FileDelta {
+            path: path.into(),
+            offenders_before: ob,
+            offenders_after: oa,
+            worst_cc_before: wb,
+            worst_cc_after: wa,
+            metrics_before: None,
+            metrics_after: None,
+            status: status.into(),
+        };
+        let base = |regressed: Vec<FileDelta>, before_dup: usize, after_dup: usize| RunDelta {
+            since_secs: 1,
+            before: snap(0, before_dup),
+            after: snap(0, after_dup),
+            improved_files: vec![],
+            regressed_files: regressed,
+            changed_files: vec![],
+        };
+
+        // Clean: no regressed files, duplication unchanged -> no reasons -> passes.
+        assert!(regression_reasons(&base(vec![], 100, 100)).is_empty());
+
+        // A file that gained an offender -> one reason naming the offender move.
+        let r = regression_reasons(&base(vec![fd("orm.rb", 0, 1, 5, 41, "regressed")], 0, 0));
+        assert_eq!(r.len(), 1);
+        assert!(r[0].contains("orm.rb") && r[0].contains("offenders 0->1") && r[0].contains("41"));
+
+        // A brand-new file arriving WITH an offender -> flagged as NEW.
+        let r = regression_reasons(&base(vec![fd("new.py", 0, 2, 0, 30, "new")], 0, 0));
+        assert!(r[0].contains("new.py") && r[0].contains("NEW file"));
+
+        // Duplication is the summary axis the per-file pass never gates: a rise
+        // in duplicated lines alone must still trip the gate.
+        let r = regression_reasons(&base(vec![], 100, 143));
+        assert_eq!(r.len(), 1);
+        assert!(r[0].contains("duplicated lines 100->143"));
+
+        // A DROP in duplication is not a regression.
+        assert!(regression_reasons(&base(vec![], 143, 100)).is_empty());
     }
 
     // ---- Non-Python: proves no framework / no project needed -----------------

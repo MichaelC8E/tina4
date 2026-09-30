@@ -237,6 +237,14 @@ enum Commands {
         /// what improved or regressed)
         #[arg(long = "no-history")]
         no_history: bool,
+        /// Exit 1 if this scan REGRESSED against the committed .tina4-metrics.json
+        /// baseline (a new offender file, more offenders, a worse worst-case
+        /// complexity on a file that still offends, or more duplicated lines).
+        /// The ratchet CI gate: commit a clean baseline, and this fails only when
+        /// the code gets measurably worse than it. No baseline = nothing to gate
+        /// (warns and passes). Independent of --fail-on; either may trip the exit.
+        #[arg(long = "fail-on-regression")]
+        fail_on_regression: bool,
     },
 
     /// Any command the client doesn't own is forwarded verbatim to the detected
@@ -429,16 +437,17 @@ fn main() {
         // Native, language-agnostic metrics engine (ADR-0002). No longer
         // forwarded to the framework CLI — scans SOURCE directly, no project
         // or running framework required.
-        Commands::Metrics { path, fail_on, json, top, exclude, include_non_production, no_history } => {
-            std::process::exit(metrics::run(
+        Commands::Metrics { path, fail_on, json, top, exclude, include_non_production, no_history, fail_on_regression } => {
+            std::process::exit(metrics::run(metrics::RunOptions {
                 path,
                 top,
                 json,
                 fail_on,
-                exclude,
+                exclusions: exclude,
                 include_non_production,
                 no_history,
-            ));
+                fail_on_regression,
+            }));
         }
 
         // Any non-native command (migrate, migrate:create, seed, test, routes,
