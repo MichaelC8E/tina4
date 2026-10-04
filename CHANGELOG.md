@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.8.96 — 2026-10-04
+
+- fix(skills): `tina4 skills` / `tina4 update` now install the CURRENT published skills. The native installer carried a hardcoded 8-skill list and a baked `3.13.138` ref, so it could neither advance to a newer ref nor install a newly added skill - it attempted an 8-skill install against the 9-skill `3.13.146` ref and failed checksum. It is now data-driven: the ref is resolved from the served `install-skills.sh` (so a skills release reaches `tina4 update` with no CLI release), and the exact file set is derived from the published `skills.sha256` manifest (any skills, any one-level-nested references). CDN-fallback repo routing is a rule, not a list, so a new skill needs no change here and a wrong guess only loses the fallback, never the primary tier. Guards added so the installer can never again drift from the manifest (#60).
+
 ## 3.8.95 — 2026-09-30
 
 - feat(metrics): `tina4 metrics --fail-on-regression` — a ratchet CI gate that exits 1 when a scan is measurably worse than the committed `.tina4-metrics.json` baseline: a new offender file, more offenders on a file, a worse worst-case complexity on a file that still offends, or more duplicated lines. It reuses the same "Since last run" classification, so it never fails on movement the report already prints as clean or improved. It is read-only on the baseline — a check never advances the ratchet, so re-baselining stays a deliberate plain `tina4 metrics` run you then commit — warns and passes when there is no baseline, and cannot combine with `--no-history`. Preferred over `--fail-on error` for a cross-framework gate, whose absolute severity bar fires on inherent file-size maintainability and pre-existing sub-40 complexity (#55).
