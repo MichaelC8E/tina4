@@ -39,11 +39,19 @@ use std::path::{Path, PathBuf};
 use crate::console::{icon_ok, icon_play, icon_warn};
 use colored::Colorize;
 
-/// The skills ref installed when `TINA4_SKILLS_REF` is unset. Pinned to a
-/// released tag, not a moving branch, so an install is reproducible. This is the
-/// same default the two installer scripts carry; bump it (and `skills.sha256`)
-/// in the release that changes the skills.
-const DEFAULT_REF: &str = "3.13.138";
+/// The skills ref used only as an OFFLINE fallback, when `TINA4_SKILLS_REF` is
+/// unset AND the latest published ref cannot be fetched from the served installer
+/// (see [`resolve_ref`]). The normal path resolves the ref dynamically, so a
+/// skills release reaches `tina4 update` WITHOUT a CLI release. This constant is
+/// just the last-resort floor for a fully offline machine.
+const DEFAULT_REF: &str = "3.13.146";
+
+/// The served installer whose pinned `TINA4_SKILLS_REF` default IS the current
+/// published ref. `tina4 update` / `tina4 skills` resolve "latest" from here (the
+/// same endpoint `tina4 doctor` reports against), so what a refresh installs
+/// always equals what the published installer would. Fetched with the in-process
+/// download primitive - this module still spawns nothing of its own.
+const SKILLS_INSTALL_URL: &str = "https://tina4.com/install-skills.sh";
 
 /// The three fetch tiers, in priority order. tina4.com FIRST so the common path
 /// never depends on GitHub raw (which 503s during GitHub incidents); jsDelivr and
@@ -64,54 +72,27 @@ const DEFAULT_RETRY_DELAY_SECS: u64 = 2;
 /// multiply that wait. Once this much time has gone, no further attempt starts.
 const FETCH_BUDGET_SECS: u64 = 60;
 
-/// Every reference file a per-language developer skill ships. Every file under
-/// `references/`, not most of them — `ai-coder-rule-path.svg` was once omitted,
-/// so a SUCCESSFUL install still produced an incomplete skill.
-const DEV_REFS: &[&str] = &[
-    "auth-and-services.md",
-    "data-and-orm.md",
-    "deployment.md",
-    "routes-and-api.md",
-    "templates-and-frontend.md",
-    "realtime.md",
-    "web-push.md",
-    "ai-coder-rule-path.svg",
-];
-
 /// Skill directories from an older layout that must be removed from a target
 /// before the current skills are written.
 const LEGACY_SKILLS: &[&str] = &["tina4-developer"];
 
-/// One skill to fetch: which framework repo hosts it (only used to build the
-/// jsDelivr and raw URLs) and which `references/` files it ships alongside
-/// `SKILL.md`.
-struct SkillSpec {
-    repo: &'static str,
-    skill: &'static str,
-    refs: &'static [&'static str],
+/// Which framework repo hosts a skill, for the jsDelivr and raw FALLBACK URLs
+/// only (the primary tina4.com tier is flat and repo-independent). This is the
+/// ONE piece of per-skill knowledge left, and it is a rule, not a list, so new
+/// skills need no change here: a per-language developer skill comes from its own
+/// framework repo, `tina4-cli` from the CLI repo, and every other (shared) skill
+/// is served from `tina4-python`. Getting this wrong for a brand-new skill only
+/// loses the CDN fallback for it; the primary tier still serves it.
+fn repo_for_skill(skill: &str) -> &'static str {
+    match skill {
+        "tina4-developer-python" => "tina4-python",
+        "tina4-developer-php" => "tina4-php",
+        "tina4-developer-ruby" => "tina4-ruby",
+        "tina4-developer-nodejs" => "tina4-nodejs",
+        "tina4-cli" => "tina4",
+        _ => "tina4-python",
+    }
 }
-
-/// The eight skills, in the scripts' order. Per-language developer skills come
-/// from their own framework repo; `tina4-js` and `tina4-maintainer` are shared
-/// and served from `tina4-python`.
-const INSTALLS: &[SkillSpec] = &[
-    SkillSpec { repo: "tina4-python", skill: "tina4-developer-python", refs: DEV_REFS },
-    SkillSpec { repo: "tina4-php", skill: "tina4-developer-php", refs: DEV_REFS },
-    SkillSpec { repo: "tina4-ruby", skill: "tina4-developer-ruby", refs: DEV_REFS },
-    SkillSpec { repo: "tina4-nodejs", skill: "tina4-developer-nodejs", refs: DEV_REFS },
-    SkillSpec {
-        repo: "tina4-python",
-        skill: "tina4-js",
-        refs: &["html-and-components.md", "signals-and-reactivity.md", "persistence.md", "rtc.md"],
-    },
-    SkillSpec {
-        repo: "tina4-python",
-        skill: "tina4-maintainer",
-        refs: &["cli-and-deployment.md", "frond-and-frontend.md", "routing-and-orm.md", "subsystems.md"],
-    },
-    SkillSpec { repo: "tina4-python", skill: "tina4-architect", refs: &[] },
-    SkillSpec { repo: "tina4-python", skill: "tina4-design", refs: &[] },
-];
 
 /// The resolved configuration for one install run, read from the environment
 /// once so every file is fetched from the same tiers at the same ref.
@@ -131,7 +112,7 @@ impl Config {
             env(name).and_then(|v| v.parse().ok()).unwrap_or(default)
         };
         Config {
-            reference: env("TINA4_SKILLS_REF").unwrap_or_else(|| DEFAULT_REF.to_string()),
+            reference: resolve_ref(),
             tina4_root: env("TINA4_SKILLS_TINA4_ROOT").unwrap_or_else(|| DEFAULT_TINA4_ROOT.to_string()),
             jsdelivr_root: env("TINA4_SKILLS_JSDELIVR_ROOT")
                 .unwrap_or_else(|| DEFAULT_JSDELIVR_ROOT.to_string()),
@@ -169,6 +150,47 @@ impl Config {
             format!("{}/tina4/{}/skills.sha256", self.raw_root, self.reference),
         ]
     }
+}
+
+/// Resolve the skills ref to install. `TINA4_SKILLS_REF` always wins (reproducible
+/// / pinned installs). Otherwise the current published ref is fetched from the
+/// served installer, so `tina4 update` always lands the latest skills with no CLI
+/// release. Only a fully offline machine (fetch fails) falls back to `DEFAULT_REF`.
+fn resolve_ref() -> String {
+    if let Some(pinned) = std::env::var("TINA4_SKILLS_REF").ok().filter(|v| !v.is_empty()) {
+        return pinned;
+    }
+    fetch_latest_ref().unwrap_or_else(|| DEFAULT_REF.to_string())
+}
+
+/// Fetch the served installer in-process (no spawn of our own) and read its
+/// pinned `TINA4_SKILLS_REF` default. `None` on any download or parse failure, so
+/// the caller falls back to the offline floor.
+fn fetch_latest_ref() -> Option<String> {
+    let tmp = std::env::temp_dir()
+        .join(format!("tina4-skillsref-{}", std::process::id()));
+    let outcome = crate::download_file_classified(SKILLS_INSTALL_URL, &tmp);
+    let parsed = match outcome {
+        crate::DownloadOutcome::Ok => fs::read_to_string(&tmp).ok().and_then(|s| parse_installer_ref(&s)),
+        _ => None,
+    };
+    let _ = fs::remove_file(&tmp);
+    parsed
+}
+
+/// Extract the `X.Y.Z` from a shell line like `ref="${TINA4_SKILLS_REF:-3.13.146}"`
+/// or a PowerShell `else { "3.13.146" }`. Reads the value after the marker up to
+/// the first closing brace or quote. Must stay in sync with the installer shape.
+fn parse_installer_ref(installer: &str) -> Option<String> {
+    let marker = "TINA4_SKILLS_REF:-";
+    let start = installer.find(marker)? + marker.len();
+    let rest = &installer[start..];
+    let end = rest.find(['}', '"', '\'', '\n'])?;
+    let value = rest[..end].trim();
+    if value.is_empty() || !value.contains('.') {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 /// The three destinations a target maps to, under `home`.
@@ -231,39 +253,45 @@ fn install_inner(target: &str) -> Result<(), String> {
     let stage = Stage::new()
         .map_err(|e| format!("Could not create a temporary directory for the skills — {e}"))?;
 
-    // Fetch every skill file into the staging area.
     let mut dead_hosts: Vec<String> = Vec::new();
     let started = std::time::Instant::now();
-    for spec in INSTALLS {
-        let skill_dir = stage.path.join(spec.skill);
-        fs::create_dir_all(skill_dir.join("references"))
-            .map_err(|e| format!("Could not create the staging directory for {} — {e}", spec.skill))?;
 
-        let skill_md = skill_dir.join("SKILL.md");
+    // The published `skills.sha256` manifest is the SOURCE OF TRUTH for which
+    // files make up this ref. Fetch it first and derive the entire file set from
+    // it, so the client never carries a hardcoded skill list that can drift from a
+    // release (the drift that shipped an 8-skill installer against a 9-skill ref).
+    let entries = fetch_manifest_entries(&config, &stage.path, &mut dead_hosts, started)?;
+
+    // Fetch every file the manifest names, from the right tier. The first path
+    // component is the skill; the rest is its path within the skill (SKILL.md, or
+    // references/... nested to any depth). New skills, new references and deeper
+    // nesting all flow through here with no code change.
+    let mut skills_seen: Vec<String> = Vec::new();
+    for (_hash, relative) in &entries {
+        let (skill, within) = relative
+            .split_once('/')
+            .ok_or_else(|| format!("Manifest path has no skill component: {relative}"))?;
+        let dest = stage.path.join(skill).join(within);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Could not create the staging directory for {skill} — {e}"))?;
+        }
         download_file(
             &config,
-            &skill_md,
-            &config.skill_urls(spec.repo, spec.skill, "SKILL.md"),
+            &dest,
+            &config.skill_urls(repo_for_skill(skill), skill, within),
             &mut dead_hosts,
             started,
         )?;
-        for reference in spec.refs {
-            let relative = format!("references/{reference}");
-            download_file(
-                &config,
-                &skill_dir.join("references").join(reference),
-                &config.skill_urls(spec.repo, spec.skill, &relative),
-                &mut dead_hosts,
-                started,
-            )?;
+        if !skills_seen.iter().any(|s| s == skill) {
+            skills_seen.push(skill.to_string());
+            println!("  {} {}  ({})", "+".green(), skill, repo_for_skill(skill));
         }
-        println!("  {} {}  ({})", "+".green(), spec.skill, spec.repo);
     }
 
-    // Verify every staged file against the published manifest BEFORE anything is
-    // installed, so a tampered or truncated download can never reach a skills
-    // directory.
-    verify_checksums(&config, &stage.path, &mut dead_hosts, started)?;
+    // Verify every staged file against the manifest BEFORE anything is installed,
+    // so a tampered or truncated download can never reach a skills directory.
+    verify_entries(&entries, &stage.path, &config.reference)?;
 
     // Publish into every destination.
     for destination in &destinations {
@@ -273,8 +301,9 @@ fn install_inner(target: &str) -> Result<(), String> {
     }
 
     println!(
-        "  {} Done - eight skills installed for {} (ref {}). Restart your coding tool to pick them up.",
+        "  {} Done - {} skills installed for {} (ref {}). Restart your coding tool to pick them up.",
         icon_ok().green(),
+        skills_seen.len(),
         target,
         config.reference
     );
@@ -412,55 +441,65 @@ fn download_file(
     Err(format!("every download source failed for {}", dest.display()))
 }
 
-/// Download the manifest and verify every staged file against it. A mismatch, a
-/// missing named file, or an empty manifest aborts with nothing installed.
-fn verify_checksums(
+/// Download the published manifest and parse it into `(expected_hash, relative)`
+/// entries - the authoritative list of every file in this skills ref. Every path
+/// is checked component-by-component so it can never escape the stage. An empty
+/// or malformed manifest aborts with nothing installed.
+fn fetch_manifest_entries(
     config: &Config,
     stage: &Path,
     dead_hosts: &mut Vec<String>,
     started: std::time::Instant,
-) -> Result<(), String> {
+) -> Result<Vec<(String, String)>, String> {
     let manifest_path = stage.join(".skills.sha256");
     download_file(config, &manifest_path, &config.manifest_urls(), dead_hosts, started)?;
     let manifest = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Could not read the skills checksum manifest — {e}"))?;
     let _ = fs::remove_file(&manifest_path);
 
-    let mut verified = 0usize;
+    let mut entries = Vec::new();
     for line in manifest.lines() {
         if line.trim().is_empty() {
             continue;
         }
         let (expected, relative) = parse_manifest_line(line)
             .ok_or_else(|| format!("Malformed line in the skills checksum manifest: {line}"))?;
-        // The manifest paths are forward-slashed and relative to the stage; join
-        // them component by component so this is correct on Windows too and can
-        // never escape the stage.
-        let mut file = stage.to_path_buf();
         for component in relative.split('/') {
             if component.is_empty() || component == "." || component == ".." {
                 return Err(format!("Unsafe path in the skills checksum manifest: {relative}"));
             }
+        }
+        entries.push((expected.to_string(), relative.to_string()));
+    }
+    if entries.is_empty() {
+        return Err("The skills checksum manifest is empty — refusing to install.".to_string());
+    }
+    Ok(entries)
+}
+
+/// Verify every staged file against its manifest hash. A mismatch or a missing
+/// named file aborts with nothing installed. Paths are joined component by
+/// component so this is correct on Windows and cannot escape the stage.
+fn verify_entries(entries: &[(String, String)], stage: &Path, reference: &str) -> Result<(), String> {
+    for (expected, relative) in entries {
+        let mut file = stage.to_path_buf();
+        for component in relative.split('/') {
             file.push(component);
         }
         let bytes = fs::read(&file).map_err(|_| {
             format!("A skill file named in the manifest was not downloaded: {relative}")
         })?;
-        let actual = sha256_hex(&bytes);
-        if !actual.eq_ignore_ascii_case(expected) {
+        if !sha256_hex(&bytes).eq_ignore_ascii_case(expected) {
             return Err(format!(
                 "A skill file failed checksum verification (tampering or a stale manifest) — nothing installed: {relative}"
             ));
         }
-        verified += 1;
-    }
-    if verified == 0 {
-        return Err("The skills checksum manifest is empty — refusing to install.".to_string());
     }
     println!(
-        "  {} verified {verified} skill files against skills.sha256 (ref {})",
+        "  {} verified {} skill files against skills.sha256 (ref {})",
         icon_ok().green(),
-        config.reference
+        entries.len(),
+        reference
     );
     Ok(())
 }
@@ -602,28 +641,28 @@ mod tests {
         let urls = config.skill_urls("tina4-php", "tina4-developer-php", "references/realtime.md");
         assert_eq!(
             urls[0],
-            "https://tina4.com/skills/3.13.138/tina4-developer-php/references/realtime.md"
+            "https://tina4.com/skills/3.13.146/tina4-developer-php/references/realtime.md"
         );
         assert_eq!(
             urls[1],
-            "https://cdn.jsdelivr.net/gh/tina4stack/tina4-php@3.13.138/.claude/skills/tina4-developer-php/references/realtime.md"
+            "https://cdn.jsdelivr.net/gh/tina4stack/tina4-php@3.13.146/.claude/skills/tina4-developer-php/references/realtime.md"
         );
         assert_eq!(
             urls[2],
-            "https://raw.githubusercontent.com/tina4stack/tina4-php/3.13.138/.claude/skills/tina4-developer-php/references/realtime.md"
+            "https://raw.githubusercontent.com/tina4stack/tina4-php/3.13.146/.claude/skills/tina4-developer-php/references/realtime.md"
         );
 
         let skill_md = config.skill_urls("tina4-python", "tina4-architect", "SKILL.md");
-        assert_eq!(skill_md[0], "https://tina4.com/skills/3.13.138/tina4-architect/SKILL.md");
+        assert_eq!(skill_md[0], "https://tina4.com/skills/3.13.146/tina4-architect/SKILL.md");
     }
 
     #[test]
     fn manifest_urls_point_at_the_tina4_repo() {
         let config = default_config();
         let urls = config.manifest_urls();
-        assert_eq!(urls[0], "https://tina4.com/skills/3.13.138/skills.sha256");
-        assert_eq!(urls[1], "https://cdn.jsdelivr.net/gh/tina4stack/tina4@3.13.138/skills.sha256");
-        assert_eq!(urls[2], "https://raw.githubusercontent.com/tina4stack/tina4/3.13.138/skills.sha256");
+        assert_eq!(urls[0], "https://tina4.com/skills/3.13.146/skills.sha256");
+        assert_eq!(urls[1], "https://cdn.jsdelivr.net/gh/tina4stack/tina4@3.13.146/skills.sha256");
+        assert_eq!(urls[2], "https://raw.githubusercontent.com/tina4stack/tina4/3.13.146/skills.sha256");
     }
 
     /// The installer must have a second host to fall back to. A single source is
@@ -640,13 +679,62 @@ mod tests {
 
     #[test]
     fn host_of_extracts_scheme_and_authority() {
-        assert_eq!(host_of("https://tina4.com/skills/3.13.138/x"), "https://tina4.com");
+        assert_eq!(host_of("https://tina4.com/skills/3.13.146/x"), "https://tina4.com");
         assert_eq!(
             host_of("https://cdn.jsdelivr.net/gh/tina4stack/a@1/b"),
             "https://cdn.jsdelivr.net"
         );
         assert_eq!(host_of("file:///tmp/fixtures/x"), "file://");
         assert_eq!(host_of("not-a-url"), "not-a-url");
+    }
+
+    /// The installer is manifest-driven: the skill is the FIRST path component and
+    /// the rest is its path within the skill, nested to any depth. This is how new
+    /// skills / references / deeper nesting flow through with no code change.
+    #[test]
+    fn manifest_paths_split_into_skill_and_within() {
+        assert_eq!("tina4-cli/SKILL.md".split_once('/'), Some(("tina4-cli", "SKILL.md")));
+        assert_eq!(
+            "tina4-maintainer/references/checklists/signing.md".split_once('/'),
+            Some(("tina4-maintainer", "references/checklists/signing.md"))
+        );
+        assert_eq!(
+            "tina4-design/references/ui-guide.md".split_once('/'),
+            Some(("tina4-design", "references/ui-guide.md"))
+        );
+    }
+
+    /// Repo routing is a RULE, not a list, so a brand-new skill needs no change
+    /// here - and getting it wrong only loses the CDN fallback, never the primary
+    /// tier. Guards the drift that shipped an 8-skill installer against a 9-skill ref.
+    #[test]
+    fn repo_routing_covers_known_and_future_skills() {
+        assert_eq!(repo_for_skill("tina4-developer-python"), "tina4-python");
+        assert_eq!(repo_for_skill("tina4-developer-nodejs"), "tina4-nodejs");
+        assert_eq!(repo_for_skill("tina4-cli"), "tina4");
+        // Shared skills (js, maintainer, architect, design) and any FUTURE skill
+        // default to the canonical host, tina4-python.
+        assert_eq!(repo_for_skill("tina4-maintainer"), "tina4-python");
+        assert_eq!(repo_for_skill("tina4-design"), "tina4-python");
+        assert_eq!(repo_for_skill("tina4-brand-new-skill-nobody-added-yet"), "tina4-python");
+    }
+
+    /// The latest ref is read from the served `install-skills.sh` (the only thing
+    /// `fetch_latest_ref` fetches), so the parser reads the shell `:-` default
+    /// shape. A skills release thus reaches `tina4 update` with no CLI release.
+    #[test]
+    fn parse_installer_ref_reads_the_shell_default() {
+        assert_eq!(
+            parse_installer_ref("set -eu\nref=\"${TINA4_SKILLS_REF:-3.13.146}\"\ntarget=x"),
+            Some("3.13.146".to_string())
+        );
+        assert_eq!(
+            parse_installer_ref("ref=\"${TINA4_SKILLS_REF:-3.13.200}\""),
+            Some("3.13.200".to_string())
+        );
+        // No marker, or a non-version/empty value, yields None (caller falls back).
+        assert_eq!(parse_installer_ref("nothing here"), None);
+        assert_eq!(parse_installer_ref("TINA4_SKILLS_REF:-}"), None);
     }
 
     /// SHA-256 known-answer tests from FIPS 180-4 / RFC 6234, so the verifier is
