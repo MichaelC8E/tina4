@@ -15,7 +15,7 @@ $ErrorActionPreference = "Stop"
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
-$ref = if ($env:TINA4_SKILLS_REF) { $env:TINA4_SKILLS_REF } else { "3.13.138" }
+$ref = if ($env:TINA4_SKILLS_REF) { $env:TINA4_SKILLS_REF } else { "3.13.146" }
 $target = $env:TINA4_SKILLS_TARGET
 $skillHome = if ($env:TINA4_SKILLS_HOME) { $env:TINA4_SKILLS_HOME } else { $HOME }
 # Three sources, tried in this order per file: tina4.com (Tina4's own infra),
@@ -52,9 +52,10 @@ $installs = @(
   @{ repo = "tina4-ruby";   skill = "tina4-developer-ruby";   refs = $devRefs }
   @{ repo = "tina4-nodejs"; skill = "tina4-developer-nodejs"; refs = $devRefs }
   @{ repo = "tina4-python"; skill = "tina4-js";               refs = @("html-and-components.md", "signals-and-reactivity.md", "persistence.md", "rtc.md") }
-  @{ repo = "tina4-python"; skill = "tina4-maintainer";       refs = @("cli-and-deployment.md", "frond-and-frontend.md", "routing-and-orm.md", "subsystems.md") }
+  @{ repo = "tina4-python"; skill = "tina4-maintainer";       refs = @("cli-and-deployment.md", "frond-and-frontend.md", "routing-and-orm.md", "subsystems.md", "checklists/pr-review.md", "checklists/release.md", "checklists/signing.md", "checklists/parity-sweep.md") }
   @{ repo = "tina4-python"; skill = "tina4-architect";        refs = @() }
-  @{ repo = "tina4-python"; skill = "tina4-design";           refs = @() }
+  @{ repo = "tina4-python"; skill = "tina4-design";           refs = @("phase-1-intake.md", "phase-2-market-research.md", "design-tokens.md", "brand-guidelines.md", "ui-guide.md", "handoff.md", "website.md", "design-record-templates.md") }
+  @{ repo = "tina4";        skill = "tina4-cli";              refs = @("commands.md") }
 )
 $legacySkills = @("tina4-developer")
 
@@ -242,8 +243,13 @@ try {
     Invoke-Tina4Download -Urls (Get-Tina4SkillUrls $i.repo $i.skill "SKILL.md") `
       -Destination (Join-Path $stage "$($i.skill)\SKILL.md")
     foreach ($reference in $i.refs) {
+      # A reference may be nested one level (e.g. checklists/pr-review.md). Invoke-WebRequest
+      # -OutFile does NOT create intermediate directories, so make the file's own parent first
+      # or the download fails. One level is all the skills use; Split-Path handles the flat case.
+      $refDest = Join-Path $refdir $reference
+      New-Item -ItemType Directory -Path (Split-Path -Parent $refDest) -Force | Out-Null
       Invoke-Tina4Download -Urls (Get-Tina4SkillUrls $i.repo $i.skill "references/$reference") `
-        -Destination (Join-Path $refdir $reference)
+        -Destination $refDest
     }
     Write-Host "  + $($i.skill)  ($($i.repo))" -ForegroundColor Green
   }
@@ -275,13 +281,13 @@ try {
 }
 
 Write-Host ""
-Write-Host "  Done - eight skills installed for $target (ref $ref). Restart your coding tool to pick them up." -ForegroundColor Green
+Write-Host "  Done - nine skills installed for $target (ref $ref). Restart your coding tool to pick them up." -ForegroundColor Green
 
 # SIG # Begin signature block
 # MIIoHQYJKoZIhvcNAQcCoIIoDjCCKAoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCl8Gc9GpnE7qLb
-# mrkAtDLnqoDldoSZ9XqhSztxVwn5fKCCINgwggXJMIIEsaADAgECAhAbtY8lKt8j
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDEYpjrj+8hdXY4
+# iZwXwbjmUVCTSp9ma3DfoMLFDkfb46CCINgwggXJMIIEsaADAgECAhAbtY8lKt8j
 # AEkoya49fu0nMA0GCSqGSIb3DQEBDAUAMH4xCzAJBgNVBAYTAlBMMSIwIAYDVQQK
 # ExlVbml6ZXRvIFRlY2hub2xvZ2llcyBTLkEuMScwJQYDVQQLEx5DZXJ0dW0gQ2Vy
 # dGlmaWNhdGlvbiBBdXRob3JpdHkxIjAgBgNVBAMTGUNlcnR1bSBUcnVzdGVkIE5l
@@ -461,36 +467,36 @@ Write-Host "  Done - eight skills installed for $target (ref $ref). Restart your
 # LjE4MDYGA1UEAxMvQ2VydHVtIEV4dGVuZGVkIFZhbGlkYXRpb24gQ29kZSBTaWdu
 # aW5nIDIwMjEgQ0ECEFIdiL99yRWe40RYYdsSYcYwDQYJYIZIAWUDBAIBBQCgajAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgzy7cPkFlUG0c25y9h5dXJGYLBp1CpKsz
-# rcvlG9Y573IwDQYJKoZIhvcNAQEBBQAEggGAtYC6nUdQKIAIpLZbG/Co989M7uta
-# EvU5wuvWEq8q0UdETfK2Q+b2M5/BFaYkoThaJgFjd0izFTennN0p8SFRGtNI7UUl
-# k+0/9wHQdrXXswlB2csHVqQEskmxnUb7WK3Hu0YJH9usmLqAgCqEjqxDqqx2EAnO
-# fdPCFTQCP7NWJi6dHcit/OlCpds8y3a+E8GHvJlCwZiiRHu6bUeL9K+t9JPVAUj4
-# 17qcRakWx+Bu1YEPdlGgoiTUyucFomt/hVQVclAQmcisQKKPid36O1Dw8Kh6OY8T
-# QQNus5O+0BHt6wMswsZ+dVZcclGJj773hBP08wp+eFQI/JcRpr7+Tsmb9+iTLTf/
-# tcdi/6B6sslJWEQpflTqQfJmWjUwuHXsw1VHWAleyeCSESNPQ9wftZCDPvl3EVeB
-# 7W26GFmBT/kme+vavxosTBaTXP8VTXDDg+TIaNGZCW95Ck/iDtSfyU+/zkLTl8O1
-# /kS3BK54t6AfSL/lWISVAJ1uDxumGP4GU61moYIEAjCCA/4GCSqGSIb3DQEJBjGC
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg5TRUERoOuh14lHGU6pP7mixwea7LVUGn
+# db6occ6DzeswDQYJKoZIhvcNAQEBBQAEggGAvyf90P3WQnwtO6kWFaWrvkz6pIzB
+# P29tORHeBzbuloU9vGOPdf7zxhdk9W1/XtoYnJUk5F4DpzEkEUCY33oB0hfD8P9s
+# /PaHOmRktDJr3OrA+muEH6usQ4ea86J8PX2SZFRlEZXYmj+fz46QK8qdQua6+g+M
+# pxeyr84gnLyaHzt9CyMca/BFtyKmvQYoBFwh4DxMbhLG4+pITZeZ718skXDo6s8r
+# yJ7/H+aeFxFsZzK/wt11QgpKCRJXVR/beSszAp5NmaoOLB3UW6UhKqJZsUhDXtfI
+# o6EltJFZpmczw2RjEUMPK13aulUnTaO18l6nBW2s6p8gKe6nglkfhYQq0ReOJdOZ
+# rox3I2PO0CX1ztNE4OoHZ3Cf1JktafmECO52x+hYskRTJHJT6QDcQsv1S2MRg11j
+# ko5Jcd6LgymbTSKF69XDFF+kwYzpElcYqyY/aTuMebaiozDqnZhMTfkXz+wiiAvn
+# rdPLNcc+OMKajX2jqZoMM9SEipbD+iwlyCWgoYIEAjCCA/4GCSqGSIb3DQEJBjGC
 # A+8wggPrAgEBMGowVjELMAkGA1UEBhMCUEwxITAfBgNVBAoTGEFzc2VjbyBEYXRh
 # IFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIFRpbWVzdGFtcGluZyAyMDIx
 # IENBAhAo8HfBHDa9/l90MkdwJy4DMA0GCWCGSAFlAwQCAgUAoIIBVjAaBgkqhkiG
-# 9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJKoZIhvcNAQkFMQ8XDTI2MDkyNDEzMjUw
-# OVowNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQghb6Q4QrSQ418ySi2r0iwmrIIF3zs
-# +LASbFjTkQUlxDwwPwYJKoZIhvcNAQkEMTIEMDiKHgALQzyx/HBI3tjtZUukixpy
-# TQs34NLyjRwOph04+pU+GXEW+xq6A7PvMoI0mTCBnwYLKoZIhvcNAQkQAgwxgY8w
+# 9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJKoZIhvcNAQkFMQ8XDTI2MTAwNDExMzIx
+# MVowNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQghb6Q4QrSQ418ySi2r0iwmrIIF3zs
+# +LASbFjTkQUlxDwwPwYJKoZIhvcNAQkEMTIEMMNa65isPCVKOFXrATAQ6FpxuSq1
+# YtSbhty1OGGkYW+9KencJY88/f9aHtjFsr4xhzCBnwYLKoZIhvcNAQkQAgwxgY8w
 # gYwwgYkwgYYEFFcUaEEMqFrzQk75FkpRNhD0042YMG4wWqRYMFYxCzAJBgNVBAYT
 # AlBMMSEwHwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMT
 # G0NlcnR1bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzAN
-# BgkqhkiG9w0BAQEFAASCAgAamSTORuzyAImH/R9fNsqemwbZ9u26d+XDSYsaR+/t
-# 1Z4kH+nJkTX8+N40S+9/bpfGhOmyEoY7Mdpa7CYqPoTWjFjqZrWee5cvheXeX3s2
-# E5JBJTs7jPZp7OaL+YfQ2F285JQYw04U6UdSVfPYmF8aQn/p9qsB1NLKBRbp7Fu0
-# EwSqd1KIvP4xhMPitNdMC4Zg//p8XSUDIud1uWv/OmaxHIz1wh5JAcJmJw6IKlHt
-# qC1qV819GDWTDJc2t0rk+ZlzoNrb5eW/IemvM4XFg8cgW0PxBAKCfsfulLw3glpo
-# SuZHefXYbmd44BGt4FY9UcE+ovtsfE8VIRCu4qQgUVNqQ54KiJs7XFVnQNK+XvW/
-# x7NpiymxGSRoGZEU/wWVq7cYLs3BJZZ2KsJk1Ru/RWVK+TA5rx4eLDYWo5TVSCoN
-# zlLQBoCHUlsxh3RvuuVeA1j+a0EcXZSim6EbWt41gkAPUHPfaeLk15lAm2MYs9pa
-# wmsZdnKUvL88Gn1Ssr3eupquXoFiq9Mzm6yh1G5Z/xWtoIiwF2NqvqJFpqkvVxQ3
-# hKI0R0/rAv8rIQgX9eE69quIOkZQtsX7nT+x4bNow5AkXpIRBBvEe0ufL6OxIuFz
-# cHNUKiZT7RX3SNsJU6ojyveLGNOYw0KiEs6tTHKTyrsLIdFkFpbmSTOWIB1xpARP
-# og==
+# BgkqhkiG9w0BAQEFAASCAgCoVzdJdXLmSAsQRMHok15qgTCoP47geEIBZs1TVhC7
+# Y9yqYzWiLaGqJmnPw8+itZUE7gzPnqcfNP684DiyuAiht74/ntBlHczYU87Ib1j4
+# lzAuUMI8BwmfW/ZmMd/jq3QcCDhWYXUXfhyECVC16l+nxdck93RNjManMMUC47hy
+# tc8ARLjqUQDgGnzPbiQNTrkslexHwzohfzA+ycemIUMhy/Fn0nPOdFrgSeWr/bSk
+# dRyoO09LY3+vFRV3w7xZT1NdQR6QZIxponpK6TwQkkkEmfyvqgJ1oKsYAfExAP2y
+# HoQJX3lVpLeKA3Ju+GMINcvbNx0UypWVSPuAEeFEVfd8BoURh6D2hyZRkez4WmUN
+# JZto79QqLEHsFVVfzK0T5e8v8iHsz/xp4dIWwK2Yz0LOJasB6RsOTuq3CCTAWTho
+# cNVYy2u8gOHkZQlYD/d8rD2+OBJ+ATqp8CQ7FoRRjFxH2j/KwD9QtkYGV/rMcjTM
+# HAALrhjD3EmnwwpmERSCQWuzBr8e8L21nkB8sz+Ps9iiBTXM2Oov6uVdn4353f4I
+# qM8A3hVwvJIWi5IfPrqWs/6zuzHsLArAwYokR03EKK+6Iz1LD90nUl9Bl2WRB2zq
+# TpT0H+ee6exjstA1Ptk/W2dCAMrC1U29r/KTClPO/pd9zFa88mBflLqg1svUUNsx
+# Pw==
 # SIG # End signature block
