@@ -34,8 +34,9 @@ tina4-php|tina4-developer-php|$skills_dev_refs
 tina4-ruby|tina4-developer-ruby|$skills_dev_refs
 tina4-nodejs|tina4-developer-nodejs|$skills_dev_refs
 tina4-python|tina4-js|html-and-components.md signals-and-reactivity.md persistence.md rtc.md
-tina4-python|tina4-maintainer|cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md
+tina4-python|tina4-maintainer|cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md checklists/pr-review.md checklists/release.md checklists/signing.md checklists/parity-sweep.md
 tina4-python|tina4-architect|
-tina4-python|tina4-design|
+tina4-python|tina4-design|phase-1-intake.md phase-2-market-research.md design-tokens.md brand-guidelines.md ui-guide.md handoff.md website.md design-record-templates.md
+tina4|tina4-cli|commands.md
 EOF
 }

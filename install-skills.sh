@@ -26,7 +26,7 @@ set -eu
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
-ref="${TINA4_SKILLS_REF:-3.13.138}"
+ref="${TINA4_SKILLS_REF:-3.13.146}"
 target="${TINA4_SKILLS_TARGET:-}"
 skill_home="${TINA4_SKILLS_HOME:-$HOME}"
 # Three sources, tried in this order per file: tina4.com (Tina4's own infra),
@@ -160,7 +160,13 @@ install_skill() {
   mkdir -p "$stage/$skill/references"
   download_file "$stage/$skill/SKILL.md" $(skill_urls "$repo" "$skill" "SKILL.md")
   for reference in "$@"; do
-    download_file "$stage/$skill/references/$reference" \
+    # A reference may be nested one level (e.g. checklists/pr-review.md). curl -o does
+    # NOT create intermediate directories, so make the file's own parent first or the
+    # download lands nowhere and the run fails verification. One level is all the skills
+    # use; the dirname call handles the flat case (references/) unchanged.
+    destination="$stage/$skill/references/$reference"
+    mkdir -p "$(dirname "$destination")"
+    download_file "$destination" \
       $(skill_urls "$repo" "$skill" "references/$reference")
   done
   echo "  + $skill  ($repo)"
@@ -234,12 +240,14 @@ install_skill tina4-ruby    tina4-developer-ruby    $DEV_REFS
 install_skill tina4-nodejs  tina4-developer-nodejs  $DEV_REFS
 # Shared skills (canonical copy served from tina4-python).
 install_skill tina4-python  tina4-js          html-and-components.md signals-and-reactivity.md persistence.md rtc.md
-install_skill tina4-python  tina4-maintainer  cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md
+install_skill tina4-python  tina4-maintainer  cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md checklists/pr-review.md checklists/release.md checklists/signing.md checklists/parity-sweep.md
 install_skill tina4-python  tina4-architect
-install_skill tina4-python  tina4-design
+install_skill tina4-python  tina4-design         phase-1-intake.md phase-2-market-research.md design-tokens.md brand-guidelines.md ui-guide.md handoff.md website.md design-record-templates.md
+# The tina4 CLI skill is served from the tina4 (Rust CLI) repo, not tina4-python.
+install_skill tina4         tina4-cli         commands.md
 
 verify_checksums
 publish_skills
 
 echo ""
-echo "  Done - eight skills installed for $target (ref $ref). Restart your coding tool to pick them up."
+echo "  Done - nine skills installed for $target (ref $ref). Restart your coding tool to pick them up."
