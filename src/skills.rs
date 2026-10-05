@@ -44,7 +44,7 @@ use colored::Colorize;
 /// (see [`resolve_ref`]). The normal path resolves the ref dynamically, so a
 /// skills release reaches `tina4 update` WITHOUT a CLI release. This constant is
 /// just the last-resort floor for a fully offline machine.
-const DEFAULT_REF: &str = "3.13.146";
+const DEFAULT_REF: &str = "3.13.147";
 
 /// The served installer whose pinned `TINA4_SKILLS_REF` default IS the current
 /// published ref. `tina4 update` / `tina4 skills` resolve "latest" from here (the
@@ -178,8 +178,8 @@ fn fetch_latest_ref() -> Option<String> {
     parsed
 }
 
-/// Extract the `X.Y.Z` from a shell line like `ref="${TINA4_SKILLS_REF:-3.13.146}"`
-/// or a PowerShell `else { "3.13.146" }`. Reads the value after the marker up to
+/// Extract the `X.Y.Z` from a shell line like `ref="${TINA4_SKILLS_REF:-3.13.147}"`
+/// or a PowerShell `else { "3.13.147" }`. Reads the value after the marker up to
 /// the first closing brace or quote. Must stay in sync with the installer shape.
 fn parse_installer_ref(installer: &str) -> Option<String> {
     let marker = "TINA4_SKILLS_REF:-";
@@ -641,28 +641,28 @@ mod tests {
         let urls = config.skill_urls("tina4-php", "tina4-developer-php", "references/realtime.md");
         assert_eq!(
             urls[0],
-            "https://tina4.com/skills/3.13.146/tina4-developer-php/references/realtime.md"
+            "https://tina4.com/skills/3.13.147/tina4-developer-php/references/realtime.md"
         );
         assert_eq!(
             urls[1],
-            "https://cdn.jsdelivr.net/gh/tina4stack/tina4-php@3.13.146/.claude/skills/tina4-developer-php/references/realtime.md"
+            "https://cdn.jsdelivr.net/gh/tina4stack/tina4-php@3.13.147/.claude/skills/tina4-developer-php/references/realtime.md"
         );
         assert_eq!(
             urls[2],
-            "https://raw.githubusercontent.com/tina4stack/tina4-php/3.13.146/.claude/skills/tina4-developer-php/references/realtime.md"
+            "https://raw.githubusercontent.com/tina4stack/tina4-php/3.13.147/.claude/skills/tina4-developer-php/references/realtime.md"
         );
 
         let skill_md = config.skill_urls("tina4-python", "tina4-architect", "SKILL.md");
-        assert_eq!(skill_md[0], "https://tina4.com/skills/3.13.146/tina4-architect/SKILL.md");
+        assert_eq!(skill_md[0], "https://tina4.com/skills/3.13.147/tina4-architect/SKILL.md");
     }
 
     #[test]
     fn manifest_urls_point_at_the_tina4_repo() {
         let config = default_config();
         let urls = config.manifest_urls();
-        assert_eq!(urls[0], "https://tina4.com/skills/3.13.146/skills.sha256");
-        assert_eq!(urls[1], "https://cdn.jsdelivr.net/gh/tina4stack/tina4@3.13.146/skills.sha256");
-        assert_eq!(urls[2], "https://raw.githubusercontent.com/tina4stack/tina4/3.13.146/skills.sha256");
+        assert_eq!(urls[0], "https://tina4.com/skills/3.13.147/skills.sha256");
+        assert_eq!(urls[1], "https://cdn.jsdelivr.net/gh/tina4stack/tina4@3.13.147/skills.sha256");
+        assert_eq!(urls[2], "https://raw.githubusercontent.com/tina4stack/tina4/3.13.147/skills.sha256");
     }
 
     /// The installer must have a second host to fall back to. A single source is
@@ -679,7 +679,7 @@ mod tests {
 
     #[test]
     fn host_of_extracts_scheme_and_authority() {
-        assert_eq!(host_of("https://tina4.com/skills/3.13.146/x"), "https://tina4.com");
+        assert_eq!(host_of("https://tina4.com/skills/3.13.147/x"), "https://tina4.com");
         assert_eq!(
             host_of("https://cdn.jsdelivr.net/gh/tina4stack/a@1/b"),
             "https://cdn.jsdelivr.net"
@@ -725,8 +725,8 @@ mod tests {
     #[test]
     fn parse_installer_ref_reads_the_shell_default() {
         assert_eq!(
-            parse_installer_ref("set -eu\nref=\"${TINA4_SKILLS_REF:-3.13.146}\"\ntarget=x"),
-            Some("3.13.146".to_string())
+            parse_installer_ref("set -eu\nref=\"${TINA4_SKILLS_REF:-3.13.147}\"\ntarget=x"),
+            Some("3.13.147".to_string())
         );
         assert_eq!(
             parse_installer_ref("ref=\"${TINA4_SKILLS_REF:-3.13.200}\""),
