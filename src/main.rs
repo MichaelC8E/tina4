@@ -656,57 +656,13 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
             .unwrap_or_else(|| info.default_port())
     });
 
-    // If --port was explicitly provided, kill whatever is on that port.
-    // Otherwise, auto-increment to find a free port.
-    let explicit_port = port.is_some();
-    let port = if explicit_port {
-        if std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_err() {
-            println!(
-                "{} Port {} in use — killing existing process...",
-                icon_warn().yellow(),
-                requested_port.to_string().cyan()
-            );
-            if console::kill_port(requested_port) {
-                println!(
-                    "{} Port {} freed",
-                    icon_ok().green(),
-                    requested_port.to_string().cyan()
-                );
-            } else {
-                eprintln!(
-                    "{} Could not free port {} — process may require manual termination",
-                    icon_fail().red(),
-                    requested_port
-                );
-                std::process::exit(1);
-            }
-        }
-        requested_port
-    } else {
-        // Default port: kill whatever is on it and take it over
-        if std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_err() {
-            println!(
-                "{} Port {} in use — killing existing process...",
-                icon_warn().yellow(),
-                requested_port.to_string().cyan()
-            );
-            if console::kill_port(requested_port) {
-                println!(
-                    "{} Port {} freed",
-                    icon_ok().green(),
-                    requested_port.to_string().cyan()
-                );
-            } else {
-                eprintln!(
-                    "{} Could not free port {} — process may require manual termination",
-                    icon_fail().red(),
-                    requested_port
-                );
-                std::process::exit(1);
-            }
-        }
-        requested_port
-    };
+    // A busy port, whether from --port or the default, is taken over only from
+    // this project's own Tina4 dev server. Anything else holding it is left
+    // running and serve stops, rather than killing it.
+    if std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_err() {
+        take_over_port_or_exit(requested_port);
+    }
+    let port = requested_port;
 
     println!(
         "{} Detected {} project",
@@ -970,6 +926,45 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
             }
         }
     }
+}
+
+
+/// Free a busy port for `tina4 serve`, or say why not and exit.
+fn take_over_port_or_exit(port: u16) {
+    println!(
+        "{} Port {} in use — checking whether it is this project's dev server...",
+        icon_warn().yellow(),
+        port.to_string().cyan()
+    );
+    match console::take_over_port(port, std::path::Path::new(".")) {
+        console::Takeover::Reclaimed(pids) => println!(
+            "{} Port {} freed (stopped Tina4 dev server, PID {})",
+            icon_ok().green(),
+            port.to_string().cyan(),
+            join_pids(&pids)
+        ),
+        console::Takeover::Foreign(pids) => {
+            eprintln!(
+                "{} Port {} is held by PID {}, which is not this project's Tina4 dev server — it was left running.\n  Stop it yourself, or pick another port: tina4 serve --port <port>",
+                icon_fail().red(),
+                port,
+                join_pids(&pids)
+            );
+            std::process::exit(1);
+        }
+        console::Takeover::Failed => {
+            eprintln!(
+                "{} Could not free port {} — process may require manual termination",
+                icon_fail().red(),
+                port
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn join_pids(pids: &[u32]) -> String {
+    pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
 }
 
 enum ExitCause {
