@@ -138,8 +138,42 @@ pub enum Takeover {
     /// The port is held by something that is not this project's Tina4 dev
     /// server. Nothing was signalled.
     Foreign(Vec<u32>),
+    /// Takeover was opted out (TINA4_NO_TAKEOVER / `tina4 serve --no-kill`); the
+    /// holder was left running, Tina4 or not.
+    RefusedOptout,
+    /// Not dev mode (a production bind); takeover is disabled and the holder was
+    /// left running.
+    RefusedProduction,
     /// The port is busy but its holder could not be identified or stopped.
     Failed,
+}
+
+/// Truthy in the Tina4 sense, matching every framework's `is_truthy`:
+/// `true` / `1` / `yes` / `on`, case-insensitive. Anything else is false.
+fn env_is_truthy(value: Option<String>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("true") | Some("1") | Some("yes") | Some("on")
+    )
+}
+
+/// Takeover is opted out when `TINA4_NO_TAKEOVER` is truthy. `tina4 serve
+/// --no-kill` sets this for the caller; the env var lets anything else opt out
+/// too (TAKEOVER-DEC-03).
+pub fn takeover_opted_out() -> bool {
+    env_is_truthy(std::env::var("TINA4_NO_TAKEOVER").ok())
+}
+
+/// Whether `tina4 serve` is a dev run for the takeover gate. `serve` is a dev
+/// command, so it is dev unless `TINA4_DEBUG` is explicitly falsy (the caller
+/// also gates on `--production`). The runtime bind-failure paths resolve dev
+/// from `TINA4_DEBUG` alone; both feed the ONE gate, which is the point of
+/// TAKEOVER-DEC-03.
+pub fn serve_is_dev() -> bool {
+    match std::env::var("TINA4_DEBUG") {
+        Ok(value) => env_is_truthy(Some(value)),
+        Err(_) => true, // unset: a bare `tina4 serve` is a dev run
+    }
 }
 
 /// The per-port PID file a Tina4 dev server writes when it binds.
@@ -246,7 +280,24 @@ fn stop_pid(pid: u32) {
 /// `data/.tina4-serve-<port>.pid` when it binds, and only the process named
 /// there is taken over. Anything else is refused and left running — the worst
 /// case is that the developer frees the port by hand.
-pub fn take_over_port(port: u16, project_dir: &std::path::Path) -> Takeover {
+pub fn take_over_port(
+    port: u16,
+    project_dir: &std::path::Path,
+    dev: bool,
+    no_takeover: bool,
+) -> Takeover {
+    // TAKEOVER-DEC-03: the opt-out and the dev gate come FIRST, before the port
+    // is even inspected, so a held port is never reclaimed in production or when
+    // the developer opted out. The holder is left running in both cases. `dev`
+    // and `no_takeover` are passed in (resolved by the caller from
+    // `serve_is_dev()` / `takeover_opted_out()` + `--no-kill` / `--production`)
+    // so this stays the one shared, directly testable gate.
+    if no_takeover {
+        return Takeover::RefusedOptout;
+    }
+    if !dev {
+        return Takeover::RefusedProduction;
+    }
     let holders = port_listeners(port);
     if holders.is_empty() {
         return Takeover::Failed;
@@ -363,5 +414,34 @@ mod tests {
             serve_pidfile(std::path::Path::new("/p"), 7146),
             std::path::Path::new("/p/data/.tina4-serve-7146.pid")
         );
+    }
+
+    // TAKEOVER-DEC-03: the opt-out and the dev gate are checked before the port
+    // is ever inspected, so they hold whatever the port is doing.
+    #[test]
+    fn opt_out_refuses_before_the_port_is_touched() {
+        assert_eq!(
+            take_over_port(0, std::path::Path::new("/does-not-exist"), true, true),
+            Takeover::RefusedOptout
+        );
+    }
+
+    #[test]
+    fn production_refuses_before_the_port_is_touched() {
+        assert_eq!(
+            take_over_port(0, std::path::Path::new("/does-not-exist"), false, false),
+            Takeover::RefusedProduction
+        );
+    }
+
+    #[test]
+    fn env_truthiness_matches_the_frameworks() {
+        for yes in ["true", "TRUE", "1", "yes", "On", " on "] {
+            assert!(env_is_truthy(Some(yes.to_string())), "{yes} should be truthy");
+        }
+        for no in ["false", "0", "no", "off", "", "maybe"] {
+            assert!(!env_is_truthy(Some(no.to_string())), "{no} should be falsy");
+        }
+        assert!(!env_is_truthy(None));
     }
 }

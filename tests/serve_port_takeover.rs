@@ -88,7 +88,10 @@ fn serve(dir: &Path, args: &[&str]) -> (i32, String) {
         .args(args)
         .current_dir(dir)
         .env_clear()
-        .env("PATH", format!("{}:/usr/bin:/bin", dir.join("stub-bin").display()))
+        // /usr/sbin + /sbin so the spawned serve finds `lsof` on macOS (it lives
+        // in /usr/sbin there, not /usr/bin as on Linux); without it port_listeners
+        // comes back empty and the identity-path tests can't run.
+        .env("PATH", format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", dir.join("stub-bin").display()))
         .env("HOME", dir)
         .env("TINA4_NO_BROWSER", "true")
         .stdout(Stdio::piped())
@@ -226,5 +229,64 @@ fn a_connected_client_is_not_named_as_the_holder() {
         named
     );
     let _ = other.kill();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// TAKEOVER-DEC-03 opt-out: `--no-kill` refuses to reclaim the port even from
+/// this project's OWN dev server. The pid file names the holder, so without the
+/// gate the identity check would license a kill — the gate is what spares it.
+#[test]
+fn opt_out_leaves_even_our_own_server_running() {
+    let dir = temp_dir("optout");
+    let port = free_port();
+    let Some(mut ours) = holder(port) else {
+        eprintln!("skipped: no python to hold the port");
+        return;
+    };
+    project(&dir, None);
+    fs::create_dir_all(dir.join("data")).unwrap();
+    let pidfile = dir.join("data").join(format!(".tina4-serve-{}.pid", port));
+    fs::write(&pidfile, format!("{}\n", ours.id())).unwrap();
+
+    let (code, text) = serve(&dir, &["--port", &port.to_string(), "--no-kill"]);
+
+    assert!(alive(&mut ours), "--no-kill killed our own server:\n{}", text);
+    assert_ne!(code, 0, "an opted-out busy port must fail serve:\n{}", text);
+    assert!(
+        text.contains("opted out") || text.contains("no-kill") || text.contains("TINA4_NO_TAKEOVER"),
+        "the refusal must name the opt-out:\n{}",
+        text
+    );
+    let _ = ours.kill();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// TAKEOVER-DEC-03 dev gate: `--production` is a production bind and never
+/// reclaims a port, even from this project's own dev server named in the pid
+/// file. A production bind killing a port holder is exactly the surprise the
+/// gate removes.
+#[test]
+fn production_leaves_even_our_own_server_running() {
+    let dir = temp_dir("prod");
+    let port = free_port();
+    let Some(mut ours) = holder(port) else {
+        eprintln!("skipped: no python to hold the port");
+        return;
+    };
+    project(&dir, None);
+    fs::create_dir_all(dir.join("data")).unwrap();
+    let pidfile = dir.join("data").join(format!(".tina4-serve-{}.pid", port));
+    fs::write(&pidfile, format!("{}\n", ours.id())).unwrap();
+
+    let (code, text) = serve(&dir, &["--port", &port.to_string(), "--production"]);
+
+    assert!(alive(&mut ours), "--production killed our own server:\n{}", text);
+    assert_ne!(code, 0, "a production bind on a busy port must fail serve:\n{}", text);
+    assert!(
+        text.contains("outside dev mode") || text.contains("production"),
+        "the refusal must name the dev gate:\n{}",
+        text
+    );
+    let _ = ours.kill();
     let _ = fs::remove_dir_all(&dir);
 }
